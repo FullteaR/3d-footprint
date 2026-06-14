@@ -278,6 +278,15 @@ def resolve_category_grid(grid: ElevationGrid) -> np.ndarray | None:
     cat = PlateauLuseProvider().category_grid(grid)
     if cat is None:
         cat = KsjRasterProvider().category_grid(grid)
+    else:
+        # PLATEAU land-use only classifies parcels, so water surfaces (rivers)
+        # and odd gaps fall through to "other". Fill those cells from the
+        # nationwide KSJ raster, which classifies water/everything.
+        gap = cat == "other"
+        if gap.any():
+            ksj = KsjRasterProvider().category_grid(grid)
+            cat = cat.copy()
+            cat[gap] = ksj[gap]
     # Open sea (e.g. Tokyo Bay) is not classified by either land-use source and
     # the GSI DEM returns no-data there; treat those cells as water so the sea
     # is not left as the generic "other"/building-like colour.
