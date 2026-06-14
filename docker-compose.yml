@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist DEM / PLATEAU caches across runs (avoid re-downloading).
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+      - STATIC_DIR=/app/static
