@@ -1,3 +1,12 @@
-# M1: minimal runtime. Heavy geo/mesh deps are added in M2+.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# M2: DEM fetch/decode + mesh generation + export
+numpy==2.2.1
+pillow==11.1.0
+requests==2.32.3
+trimesh==4.5.3
+scipy==1.15.0
+networkx==3.4.2
+lxml==5.3.0
