@@ -8,6 +8,9 @@ export function App() {
   const [sizeMm, setSizeMm] = useState(120);
   const [verticalScale, setVerticalScale] = useState(8);
   const [baseThickness, setBaseThickness] = useState(3);
+  const [includeTrack, setIncludeTrack] = useState(true);
+  const [trackWidth, setTrackWidth] = useState(1.2);
+  const [trackHeight, setTrackHeight] = useState(1.5);
   const [fmt, setFmt] = useState("stl");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -33,6 +36,9 @@ export function App() {
       form.append("size_mm", String(sizeMm));
       form.append("vertical_scale", String(verticalScale));
       form.append("base_thickness_mm", String(baseThickness));
+      form.append("include_track", String(includeTrack));
+      form.append("track_width_mm", String(trackWidth));
+      form.append("track_height_mm", String(trackHeight));
       form.append("fmt", fmt);
 
       const resp = await fetch("/api/generate", { method: "POST", body: form });
@@ -86,6 +92,25 @@ export function App() {
           <input type="number" min={0} max={20} step={0.5} value={baseThickness} onChange={(e) => setBaseThickness(Number(e.target.value))} style={{ width: 90 }} />
         </div>
 
+        <hr style={{ border: 0, borderTop: "1px solid #eee", margin: "0.5rem 0" }} />
+
+        <div style={row}>
+          <label>軌跡を含める</label>
+          <input type="checkbox" checked={includeTrack} onChange={(e) => setIncludeTrack(e.target.checked)} />
+        </div>
+
+        <div style={{ ...row, opacity: includeTrack ? 1 : 0.4 }}>
+          <label>軌跡の幅（mm）</label>
+          <input type="number" min={0.4} max={10} step={0.1} value={trackWidth} disabled={!includeTrack} onChange={(e) => setTrackWidth(Number(e.target.value))} style={{ width: 90 }} />
+        </div>
+
+        <div style={{ ...row, opacity: includeTrack ? 1 : 0.4 }}>
+          <label>軌跡の高さ（mm）</label>
+          <input type="number" min={0.2} max={10} step={0.1} value={trackHeight} disabled={!includeTrack} onChange={(e) => setTrackHeight(Number(e.target.value))} style={{ width: 90 }} />
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid #eee", margin: "0.5rem 0" }} />
+
         <div style={row}>
           <label>フォーマット</label>
           <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
@@ -101,7 +126,7 @@ export function App() {
       </div>
 
       <p style={{ color: "#999", fontSize: 13, marginTop: "1rem" }}>
-        M2: 地形のみ・単色。次は軌跡の凸ライン(M3)、GLBプレビューと多色(M4)。
+        M3: 地形＋軌跡の凸ライン。3MFは地形/軌跡を別ボディで出力（多色化の土台）。次はGLBプレビューと多色(M4)。
       </p>
     </main>
   );
