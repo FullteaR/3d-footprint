@@ -85,10 +85,11 @@ export function App() {
     try {
       const resp = await fetch("/api/generate", { method: "POST", body: buildForm(fmt) });
       if (!resp.ok) throw new Error(((await resp.json().catch(() => ({}))) as any).detail ?? `HTTP ${resp.status}`);
+      const ext = fmt === "stl_multi" ? "zip" : fmt;
       const url = URL.createObjectURL(await resp.blob());
       const a = document.createElement("a");
       a.href = url;
-      a.download = `footprint.${fmt}`;
+      a.download = `footprint.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
       setStatus("ダウンロードしました。");
@@ -191,7 +192,8 @@ export function App() {
           <div style={row}>
             <label>フォーマット</label>
             <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
-              <option value="3mf">3MF（多色）</option>
+              <option value="3mf">3MF（多色・単一ファイル）</option>
+              <option value="stl_multi">STL（多色・色ごと分割ZIP）</option>
               <option value="stl">STL（単色）</option>
             </select>
           </div>

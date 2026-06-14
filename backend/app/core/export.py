@@ -35,6 +35,7 @@ DEFAULT_COLORS: dict[str, str] = {
 
 _FORMATS = {
     "stl": ("model/stl", "stl"),
+    "stl_multi": ("application/zip", "zip"),
     "3mf": ("model/3mf", "3mf"),
     "glb": ("model/gltf-binary", "glb"),
 }
@@ -72,6 +73,8 @@ def export_bodies(
     if fmt == "stl":
         merged = trimesh.util.concatenate([b.mesh for b in bodies])
         data = merged.export(file_type="stl")
+    elif fmt == "stl_multi":
+        data = _write_stl_multi(bodies, used, color_map)
     elif fmt == "glb":
         scene = trimesh.Scene()
         for i, b in enumerate(bodies):
@@ -87,6 +90,35 @@ def export_bodies(
     if isinstance(data, str):
         data = data.encode()
     return data, content_type, ext
+
+
+def _write_stl_multi(bodies, used, color_map) -> bytes:
+    """One STL per colour label, bundled in a zip (STL can't carry colour).
+
+    Every STL shares the same coordinate space, so loading them all into a
+    slicer as a single multi-part object lines them up exactly; the slicer
+    slices their union (the original solid) and a filament is assigned per
+    part. A README maps each file to its intended colour.
+    """
+    buf = io.BytesIO()
+    lines = ["3d-footprint multi-colour STL set", "",
+             "Load every .stl into your slicer as ONE object's parts (they",
+             "share the same origin and line up). Assign a filament per part:",
+             ""]
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for label in used:
+            parts = []
+            for b in bodies:
+                idx = np.nonzero(b.face_labels() == label)[0]
+                if len(idx):
+                    parts.append(b.mesh.submesh([idx], append=True, repair=False))
+            if not parts:
+                continue
+            mesh = parts[0] if len(parts) == 1 else trimesh.util.concatenate(parts)
+            z.writestr(f"{label}.stl", mesh.export(file_type="stl"))
+            lines.append(f"  {label}.stl  -> {color_map.get(label, '#999999')}")
+        z.writestr("README.txt", "\n".join(lines) + "\n")
+    return buf.getvalue()
 
 
 def _write_3mf(bodies, palette, index_of) -> bytes:
