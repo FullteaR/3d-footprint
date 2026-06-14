@@ -6,7 +6,7 @@ from fastapi.responses import Response
 
 from ..core.export import Body, export_bodies
 from ..core.gpx import expand_bbox, parse_gpx
-from ..core.landuse import KsjRasterProvider
+from ..core.landuse import resolve_category_grid
 from ..core.mesh import MeshParams, make_projection, terrain_solid
 from ..core.terrain import fetch_elevation_grid
 from ..core.track import track_ridge
@@ -49,7 +49,7 @@ def generate(
             ),
         )
 
-        cat_grid = KsjRasterProvider().category_grid(grid) if landuse else None
+        cat_grid = resolve_category_grid(grid) if landuse else None
         terrain_mesh, terrain_labels = terrain_solid(proj, cat_grid)
         bodies: list[Body] = [Body(terrain_mesh, terrain_labels)]
         if include_track:

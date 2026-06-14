@@ -1,23 +1,32 @@
 """Land-use categories for terrain coloring.
 
-Primary fallback source: 国土数値情報 土地利用細分メッシュ ラスタ版 (L03-b_r).
-  - GeoTIFF, 100 m mesh, one file per 1st-level mesh (e.g. L03-b-14_5339.zip).
-  - Paletted (mode P); pixel value == the land-use code (0,10,20,...,160).
-  - Georeferencing is derived from the mesh code (a 1st-level mesh spans
-    1.0 deg lon x 0.6667 deg lat as 800x800 cells), so no GDAL is needed.
+Two providers, both returning a (ny, nx) grid of canonical category names
+aligned to the DEM ElevationGrid:
 
-A LandUseProvider returns a (ny, nx) grid of canonical category names aligned
-to the DEM ElevationGrid. PLATEAU luse will be a second provider (M5b).
+1. PLATEAU luse (preferred, finer vector polygons) — `PlateauLuseProvider`.
+   The PLATEAU CityGML data-catalog API maps a bbox/mesh to land-use (luse)
+   GML URLs; each file covers one 2nd-level mesh. We stream-parse the LandUse
+   polygons and bake them once into a paletted PNG raster per mesh (cached),
+   then sample that raster (so re-previews stay cheap even though luse GMLs can
+   be hundreds of MB).
+
+2. 国土数値情報 土地利用細分メッシュ ラスタ版 (L03-b_r) — `KsjRasterProvider`.
+   Nationwide 100 m GeoTIFF fallback when no PLATEAU luse covers the area.
+   Georeferencing is derived from the mesh code (no GDAL).
+
+`resolve_category_grid()` tries PLATEAU first, then falls back to KSJ.
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import math
 import zipfile
 from typing import Protocol
 
 import numpy as np
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from ..config import DATA_DIR
 from .terrain import ElevationGrid
@@ -104,3 +113,167 @@ class KsjRasterProvider:
             out[m] = names
 
         return out
+
+
+# --------------------------------------------------------------------------- #
+# PLATEAU luse provider
+# --------------------------------------------------------------------------- #
+
+DATACATALOG_URL = "https://api.plateauview.mlit.go.jp/datacatalog/citygml/m:{codes}"
+_OTHER_IDX = CATEGORIES.index("other")
+_CAT_IDX = {c: i for i, c in enumerate(CATEGORIES)}
+PLATEAU_PX = 2048        # raster size per 2nd-level mesh (~5 m/px)
+MESH2_DLAT = 1.0 / 12.0  # 2nd-level mesh latitude span (5 arc-min)
+MESH2_DLON = 1.0 / 8.0   # 2nd-level mesh longitude span (7.5 arc-min)
+
+_LANDUSE_TAG = "{http://www.opengis.net/citygml/landuse/2.0}LandUse"
+_LU_NS = {
+    "luse": "http://www.opengis.net/citygml/landuse/2.0",
+    "gml": "http://www.opengis.net/gml",
+}
+
+# PLATEAU Common_landUseType code -> canonical category.
+_PLATEAU_TO_CAT = {
+    "201": "field", "202": "field", "260": "field",          # 田 / 畑 / 農地
+    "203": "forest", "217": "forest", "220": "forest",        # 山林 / 公園緑地 / ゴルフ場
+    "204": "water",                                           # 水面
+    "205": "bare", "221": "bare", "223": "bare",              # その他自然地 / 太陽光 / その他都市的利用
+    "224": "bare", "252": "bare", "263": "bare",              # 低未利用地 / 非可住地 / 空地
+    "211": "urban", "212": "urban", "213": "urban", "214": "urban",
+    "215": "urban", "216": "urban", "218": "urban", "219": "urban",
+    "222": "urban", "251": "urban", "261": "urban", "262": "urban",
+    "231": "other",                                           # 不明
+}
+
+
+def _mesh2_codes(bbox: tuple[float, float, float, float]) -> list[str]:
+    """2nd-level (6-digit) JIS mesh codes covering a bbox."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    def code(lat: float, lon: float) -> str:
+        p, u = int(lat * 1.5), int(lon) - 100      # 1st-level mesh
+        q = int((lat - p / 1.5) / MESH2_DLAT)      # 0..7 within 1st mesh
+        v = int((lon - (u + 100)) / MESH2_DLON)    # 0..7 within 1st mesh
+        return f"{p:02d}{u:02d}{q}{v}"
+
+    codes = set()
+    lat = min_lat
+    while lat <= max_lat + MESH2_DLAT:
+        lon = min_lon
+        while lon <= max_lon + MESH2_DLON:
+            codes.add(code(lat, lon))
+            lon += MESH2_DLON
+        lat += MESH2_DLAT
+    return sorted(codes)
+
+
+def _mesh2_origin(code: str) -> tuple[float, float]:
+    """(lon_west, lat_south) of a 6-digit 2nd-level mesh."""
+    lat0 = int(code[:2]) / 1.5 + int(code[4]) * MESH2_DLAT
+    lon0 = int(code[2:4]) + 100.0 + int(code[5]) * MESH2_DLON
+    return lon0, lat0
+
+
+class PlateauLuseProvider:
+    """PLATEAU 土地利用 (luse) provider. Covers PLATEAU cities only."""
+
+    def _luse_urls(self, codes: list[str]) -> dict[str, list[str]]:
+        """Map each covered mesh code -> luse GML URLs (one per covering city)."""
+        try:
+            resp = requests.get(
+                DATACATALOG_URL.format(codes=",".join(codes)),
+                headers={"User-Agent": "3d-footprint/0.1"},
+                timeout=60,
+            )
+        except requests.RequestException:
+            return {}
+        if resp.status_code != 200:
+            return {}
+        wanted = set(codes)
+        out: dict[str, list[str]] = {}
+        for city in resp.json().get("cities", []):
+            for entry in city.get("files", {}).get("luse", []) or []:
+                mesh = str(entry.get("code"))
+                if mesh in wanted and entry.get("url"):
+                    out.setdefault(mesh, []).append(entry["url"])
+        return out
+
+    def _raster(self, mesh: str, url: str) -> np.ndarray | None:
+        """Category-index raster (PLATEAU_PX^2 uint8) for one luse GML, cached."""
+        key = hashlib.sha1(url.encode()).hexdigest()[:16]
+        cache = DATA_DIR / "landuse" / "plateau" / f"{mesh}_{key}.png"
+        if cache.is_file():
+            return np.array(Image.open(cache))
+
+        lon0, lat0 = _mesh2_origin(mesh)
+        lat_n = lat0 + MESH2_DLAT
+        img = Image.new("P", (PLATEAU_PX, PLATEAU_PX), _OTHER_IDX)
+        draw = ImageDraw.Draw(img)
+        try:
+            with requests.get(
+                url, headers={"User-Agent": "3d-footprint/0.1"}, stream=True, timeout=300
+            ) as resp:
+                resp.raise_for_status()
+                resp.raw.decode_content = True
+                from lxml import etree
+
+                for _, el in etree.iterparse(resp.raw, tag=_LANDUSE_TAG):
+                    cl = el.find("luse:class", _LU_NS)
+                    idx = _CAT_IDX[_PLATEAU_TO_CAT.get(cl.text if cl is not None else "", "other")]
+                    for pos in el.iter("{http://www.opengis.net/gml}posList"):
+                        vals = pos.text.split()
+                        lat = np.array(vals[0::3], dtype=float)
+                        lon = np.array(vals[1::3], dtype=float)
+                        col = (lon - lon0) / MESH2_DLON * PLATEAU_PX
+                        row = (lat_n - lat) / MESH2_DLAT * PLATEAU_PX  # north at top
+                        if len(col) >= 3:
+                            draw.polygon(list(zip(col, row)), fill=idx)
+                    el.clear()
+        except (requests.RequestException, OSError, ValueError):
+            return None
+
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        img.save(cache)
+        return np.array(img)
+
+    def category_grid(self, grid: ElevationGrid) -> np.ndarray | None:
+        bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
+        urls = self._luse_urls(_mesh2_codes(bbox))
+        if not urls:
+            return None
+
+        lon2d, lat2d = np.meshgrid(grid.lons, grid.lats)
+        out = np.full(lon2d.shape, "other", dtype="<U8")
+        any_cover = False
+        for mesh, mesh_urls in urls.items():
+            lon0, lat0 = _mesh2_origin(mesh)
+            lat_n = lat0 + MESH2_DLAT
+            m = (
+                (lon2d >= lon0) & (lon2d < lon0 + MESH2_DLON)
+                & (lat2d >= lat0) & (lat2d < lat_n)
+            )
+            if not m.any():
+                continue
+            cols = np.clip((lon2d[m] - lon0) / MESH2_DLON * PLATEAU_PX, 0, PLATEAU_PX - 1).astype(int)
+            rows = np.clip((lat_n - lat2d[m]) / MESH2_DLAT * PLATEAU_PX, 0, PLATEAU_PX - 1).astype(int)
+            for url in mesh_urls:
+                raster = self._raster(mesh, url)
+                if raster is None:
+                    continue
+                any_cover = True
+                idx = raster[rows, cols]
+                names = np.array([CATEGORIES[int(v)] for v in idx], dtype="<U8")
+                # Later cities only fill cells the earlier ones left as "other".
+                sub = out[m]
+                fill = sub == "other"
+                sub[fill] = names[fill]
+                out[m] = sub
+        return out if any_cover else None
+
+
+def resolve_category_grid(grid: ElevationGrid) -> np.ndarray | None:
+    """PLATEAU luse if the area is covered, else 国土数値情報 raster fallback."""
+    plateau = PlateauLuseProvider().category_grid(grid)
+    if plateau is not None:
+        return plateau
+    return KsjRasterProvider().category_grid(grid)
