@@ -21,12 +21,17 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
     camera.position.set(0, 150, 150);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     mount.appendChild(renderer.domElement);
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.1));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.4);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 1.0));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.6);
     dir.position.set(120, 200, 100);
     scene.add(dir);
+    const dir2 = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir2.position.set(-100, 120, -80);
+    scene.add(dir2);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -38,7 +43,7 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
     const resize = () => {
       const w = mount.clientWidth;
       const h = mount.clientHeight;
-      renderer.setSize(w, h, false);
+      renderer.setSize(w, h); // updateStyle=true so the canvas fills the box
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     };
@@ -72,12 +77,21 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
       const model = gltf.scene;
       model.rotation.x = -Math.PI / 2; // Z-up (mm) -> Y-up
 
+      // Replace trimesh's PBR/metallic material with a flat, non-metallic one
+      // so the per-face colors read true and bright. DoubleSide keeps building
+      // faces (whose source normals are inconsistent) from rendering dark.
       model.traverse((o) => {
         const mesh = o as THREE.Mesh;
-        if (mesh.isMesh && mesh.geometry.getAttribute("color")) {
-          (mesh.material as THREE.MeshStandardMaterial).vertexColors = true;
-          (mesh.material as THREE.MeshStandardMaterial).needsUpdate = true;
-        }
+        if (!mesh.isMesh) return;
+        const hasColor = !!mesh.geometry.getAttribute("color");
+        mesh.material = new THREE.MeshStandardMaterial({
+          vertexColors: hasColor,
+          color: hasColor ? 0xffffff : 0xc2b280,
+          metalness: 0,
+          roughness: 0.85,
+          side: THREE.DoubleSide,
+          flatShading: true,
+        });
       });
 
       scene.add(model);
