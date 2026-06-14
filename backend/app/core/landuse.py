@@ -275,7 +275,14 @@ class PlateauLuseProvider:
 
 def resolve_category_grid(grid: ElevationGrid) -> np.ndarray | None:
     """PLATEAU luse if the area is covered, else 国土数値情報 raster fallback."""
-    plateau = PlateauLuseProvider().category_grid(grid)
-    if plateau is not None:
-        return plateau
-    return KsjRasterProvider().category_grid(grid)
+    cat = PlateauLuseProvider().category_grid(grid)
+    if cat is None:
+        cat = KsjRasterProvider().category_grid(grid)
+    # Open sea (e.g. Tokyo Bay) is not classified by either land-use source and
+    # the GSI DEM returns no-data there; treat those cells as water so the sea
+    # is not left as the generic "other"/building-like colour.
+    sea = ~np.isfinite(grid.elev)
+    if sea.any():
+        cat = cat.copy()
+        cat[sea] = "water"
+    return cat
