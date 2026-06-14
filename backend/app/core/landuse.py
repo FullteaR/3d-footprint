@@ -207,7 +207,9 @@ class PlateauLuseProvider:
 
         lon0, lat0 = _mesh2_origin(mesh)
         lat_n = lat0 + MESH2_DLAT
-        img = Image.new("P", (PLATEAU_PX, PLATEAU_PX), _OTHER_IDX)
+        # Mode "L" (not "P"): pixel value == category index, preserved exactly
+        # across PNG save/reload (a paletted "P" image remaps indices on save).
+        img = Image.new("L", (PLATEAU_PX, PLATEAU_PX), _OTHER_IDX)
         draw = ImageDraw.Draw(img)
         try:
             with requests.get(

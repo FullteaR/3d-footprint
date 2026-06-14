@@ -29,6 +29,8 @@ DEFAULT_COLORS: dict[str, str] = {
     "terrain": "#c2b280",
     "base": "#8a7f6f",
     "track": "#dc4628",
+    "roof": "#b5651d",
+    "wall": "#e6ddcb",
 }
 
 _FORMATS = {

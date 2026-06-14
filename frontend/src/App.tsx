@@ -14,8 +14,11 @@ export function App() {
   const [includeTrack, setIncludeTrack] = useState(true);
   const [trackWidth, setTrackWidth] = useState(1.2);
   const [trackHeight, setTrackHeight] = useState(1.5);
+  const [includeBuildings, setIncludeBuildings] = useState(false);
   const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
+  const [roofColor, setRoofColor] = useState("#b5651d");
+  const [wallColor, setWallColor] = useState("#e6ddcb");
   const [fmt, setFmt] = useState("3mf");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -36,12 +39,15 @@ export function App() {
       f.append("include_track", String(includeTrack));
       f.append("track_width_mm", String(trackWidth));
       f.append("track_height_mm", String(trackHeight));
+      f.append("include_buildings", String(includeBuildings));
       f.append("terrain_color", terrainColor);
       f.append("track_color", trackColor);
+      f.append("roof_color", roofColor);
+      f.append("wall_color", wallColor);
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, terrainColor, trackColor]
+    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, terrainColor, trackColor, roofColor, wallColor]
   );
 
   const LANDUSE_LEGEND: [string, string][] = [
@@ -157,6 +163,28 @@ export function App() {
             <label>軌跡の色</label>
             <input type="color" value={trackColor} disabled={!includeTrack} onChange={(e) => setTrackColor(e.target.value)} />
           </div>
+
+          <hr style={{ border: 0, borderTop: "1px solid #eee" }} />
+
+          <div style={row}>
+            <label>建物 (PLATEAU LOD2)</label>
+            <input type="checkbox" checked={includeBuildings} onChange={(e) => setIncludeBuildings(e.target.checked)} />
+          </div>
+          {includeBuildings && (
+            <>
+              <div style={{ fontSize: 12, color: "#888", margin: "0 0 0.4rem" }}>
+                PLATEAU整備済みの都市のみ。初回は建物データのDLに時間がかかります。
+              </div>
+              <div style={row}>
+                <label>屋根の色</label>
+                <input type="color" value={roofColor} onChange={(e) => setRoofColor(e.target.value)} />
+              </div>
+              <div style={row}>
+                <label>壁の色</label>
+                <input type="color" value={wallColor} onChange={(e) => setWallColor(e.target.value)} />
+              </div>
+            </>
+          )}
 
           <hr style={{ border: 0, borderTop: "1px solid #eee" }} />
 

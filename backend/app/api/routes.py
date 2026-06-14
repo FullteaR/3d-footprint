@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
 from ..core.gpx import expand_bbox, parse_gpx
 from ..core.landuse import resolve_category_grid
@@ -28,9 +29,12 @@ def generate(
     track_width_mm: float = Form(1.2),
     track_height_mm: float = Form(1.5),
     include_track: bool = Form(True),
+    include_buildings: bool = Form(False),
     landuse: bool = Form(False),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
+    roof_color: str = Form("#b5651d"),
+    wall_color: str = Form("#e6ddcb"),
     dem_zoom: int = Form(14),
     grid_max: int = Form(400),
     fmt: str = Form("stl"),
@@ -52,11 +56,18 @@ def generate(
         cat_grid = resolve_category_grid(grid) if landuse else None
         terrain_mesh, terrain_labels = terrain_solid(proj, cat_grid)
         bodies: list[Body] = [Body(terrain_mesh, terrain_labels)]
+        if include_buildings:
+            building_body = PlateauBuildingProvider().building_body(proj)
+            if building_body is not None:
+                bodies.append(building_body)
         if include_track:
             bodies.append(Body(track_ridge(track, proj, track_width_mm, track_height_mm), "track"))
 
         # "terrain" label (land-use off) maps to the user's terrain color.
-        colors = {"terrain": terrain_color, "track": track_color}
+        colors = {
+            "terrain": terrain_color, "track": track_color,
+            "roof": roof_color, "wall": wall_color,
+        }
         data, content_type, ext = export_bodies(bodies, fmt, colors)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
