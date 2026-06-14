@@ -89,8 +89,15 @@ def make_projection(grid: ElevationGrid, params: MeshParams) -> Projection:
     )
 
 
-def terrain_solid(proj: Projection) -> trimesh.Trimesh:
-    """Build a closed terrain mesh: draped top surface + flat bottom + side walls."""
+def terrain_solid(
+    proj: Projection, category_grid: np.ndarray | None = None
+) -> tuple[trimesh.Trimesh, np.ndarray]:
+    """Build a closed terrain mesh and per-face labels.
+
+    Top faces are labelled by land-use category (when `category_grid` is given,
+    a (ny, nx) array of category names); the bottom and walls are labelled
+    "base". Returns (mesh, face_labels) with face order preserved.
+    """
     grid = proj.grid
     ny, nx = grid.elev.shape
     xs = proj.x_of(grid.lons)                    # (nx,)
@@ -119,6 +126,7 @@ def terrain_solid(proj: Projection) -> trimesh.Trimesh:
     top_faces = np.concatenate(
         [np.column_stack([v00, v10, v11]), np.column_stack([v00, v11, v01])]
     )
+    n_cells = (ny - 1) * (nx - 1)
     bot_faces = top_faces[:, ::-1] + n_top
 
     def wall(seq):
@@ -136,8 +144,19 @@ def terrain_solid(proj: Projection) -> trimesh.Trimesh:
         + [(ny - 1, cc) for cc in range(nx - 2, -1, -1)]
         + [(rr, 0) for rr in range(ny - 2, -1, -1)]
     )
-    faces = np.vstack([top_faces, bot_faces, np.array(wall(border), dtype=np.int64)])
+    wall_faces = np.array(wall(border), dtype=np.int64)
+    faces = np.vstack([top_faces, bot_faces, wall_faces])
 
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+    # Per-face labels (same order as `faces`): top by category, rest "base".
+    if category_grid is not None:
+        cell_cat = category_grid[:-1, :-1].ravel()  # one category per grid cell
+    else:
+        cell_cat = np.full(n_cells, "terrain", dtype="<U8")
+    top_labels = np.concatenate([cell_cat, cell_cat])  # two triangles per cell
+    base_labels = np.full(len(bot_faces) + len(wall_faces), "base", dtype="<U8")
+    labels = np.concatenate([top_labels, base_labels])
+
+    # process=False keeps face order (vertices are already shared by index).
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     mesh.fix_normals()
-    return mesh
+    return mesh, labels
