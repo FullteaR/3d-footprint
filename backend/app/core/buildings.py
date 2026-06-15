@@ -8,8 +8,8 @@ Each building uses its best available LOD: LOD2 semantic surfaces
 polygons) when present, otherwise its LOD1 `bldg:lod1Solid` (a flat-top prism).
 All faces share a single "building" colour. At real-world scale a typical
 building is a fraction of a millimetre tall, so building_body takes a separate
-height_scale knob to exaggerate it; the base is embedded so it fuses to the
-surface.
+height_scale knob to exaggerate it (plus a small floor so none vanish); the
+base is embedded so it fuses to the surface.
 
 Polygons (lat/lon/height, EPSG 6697; height is 標高 T.P., same datum as the
 GSI DEM) are triangulated once and cached per mesh as a compact npz in
@@ -34,6 +34,7 @@ from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
 EMBED_MM = 0.5            # how far building bases sink into the terrain
+MIN_PROTRUDE_MM = 0.1     # floor so a building never fully vanishes under EMBED
 
 _BLDG_NS = "http://www.opengis.net/citygml/building/2.0"
 _GML_NS = "http://www.opengis.net/gml"
@@ -265,12 +266,25 @@ class PlateauBuildingProvider:
         np.logical_and.at(keep_b, vbid, inside)
         surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
 
+        # Height = real-world (horizontal) scale x a user exaggeration. Unlike
+        # terrain relief, buildings are not driven by the terrain vertical_scale
+        # — they have their own knob. A small per-building floor keeps even very
+        # short buildings from sinking entirely below EMBED and vanishing.
+        bh_mm = np.zeros(nb)
+        np.maximum.at(bh_mm, vbid, (h - ground[vbid]) * proj.scale * height_scale)
+        lift = np.maximum(
+            1.0,
+            np.divide(MIN_PROTRUDE_MM + EMBED_MM, bh_mm,
+                      out=np.ones(nb), where=bh_mm > 1e-6),
+        )
+
         gx = proj.x_of(lon)
         gy = proj.y_of(lat)
-        # Height = real-world (horizontal) scale x a user exaggeration; the base
-        # is embedded so it fuses to the terrain. Unlike terrain relief, buildings
-        # are not driven by the terrain vertical_scale — they have their own knob.
-        gz = surface[vbid] + (h - ground[vbid]) * proj.scale * height_scale - EMBED_MM
+        gz = (
+            surface[vbid]
+            + (h - ground[vbid]) * proj.scale * height_scale * lift[vbid]
+            - EMBED_MM
+        )
         out_v = np.column_stack([gx, gy, gz])
 
         keep_face = keep_b[vbid[faces[:, 0]]]

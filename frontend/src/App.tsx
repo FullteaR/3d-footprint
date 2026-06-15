@@ -15,7 +15,7 @@ export function App() {
   const [trackWidth, setTrackWidth] = useState(1.2);
   const [trackHeight, setTrackHeight] = useState(1.5);
   const [includeBuildings, setIncludeBuildings] = useState(false);
-  const [buildingScale, setBuildingScale] = useState(10);
+  const [buildingScale, setBuildingScale] = useState(1);
   const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
