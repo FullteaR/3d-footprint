@@ -7,9 +7,9 @@ Each building uses its best available LOD: LOD2 semantic surfaces
 (`bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}` with lod2MultiSurface
 polygons) when present, otherwise its LOD1 `bldg:lod1Solid` (a flat-top prism).
 All faces share a single "building" colour. At real-world scale a typical
-building is a fraction of a millimetre tall, so each is given a minimum visible
-protrusion above the terrain (see building_body); the base is embedded so it
-fuses to the surface.
+building is a fraction of a millimetre tall, so building_body takes a separate
+height_scale knob to exaggerate it; the base is embedded so it fuses to the
+surface.
 
 Polygons (lat/lon/height, EPSG 6697; height is 標高 T.P., same datum as the
 GSI DEM) are triangulated once and cached per mesh as a compact npz in
@@ -34,11 +34,6 @@ from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
 EMBED_MM = 0.5            # how far building bases sink into the terrain
-# Minimum height a building must clear above the terrain surface (mm). At real
-# scale a typical 7 m building is well under a millimetre, so without this most
-# of the city would sink below EMBED and vanish; short buildings are lifted to
-# this height (tall ones keep their true, scaled height).
-MIN_PROTRUDE_MM = 0.8
 
 _BLDG_NS = "http://www.opengis.net/citygml/building/2.0"
 _GML_NS = "http://www.opengis.net/gml"
@@ -222,8 +217,12 @@ class PlateauBuildingProvider:
         np.savez_compressed(cache, verts=verts, faces=faces, ftype=ftype, vbid=vbid)
         return verts, faces, ftype, vbid
 
-    def building_body(self, proj: Projection) -> Body | None:
-        """One Body holding every covered building, snapped onto the terrain."""
+    def building_body(self, proj: Projection, height_scale: float = 1.0) -> Body | None:
+        """One Body holding every covered building, snapped onto the terrain.
+
+        `height_scale` exaggerates building height (1.0 = real-world proportion);
+        the base stays anchored to the terrain surface, so only the height grows.
+        """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
         urls = self._bldg_urls(_mesh3_codes(bbox))
@@ -266,19 +265,12 @@ class PlateauBuildingProvider:
         np.logical_and.at(keep_b, vbid, inside)
         surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
 
-        # Per-building height in mm at print scale, and the exaggeration needed so
-        # each building clears MIN_PROTRUDE_MM above the surface (1.0 = true height).
-        bh_mm = np.zeros(nb)
-        np.maximum.at(bh_mm, vbid, (h - ground[vbid]) * proj.scale)
-        vscale = np.maximum(
-            1.0,
-            np.divide(MIN_PROTRUDE_MM + EMBED_MM, bh_mm,
-                      out=np.ones(nb), where=bh_mm > 1e-6),
-        )
-
         gx = proj.x_of(lon)
         gy = proj.y_of(lat)
-        gz = surface[vbid] + (h - ground[vbid]) * proj.scale * vscale[vbid] - EMBED_MM
+        # Height = real-world (horizontal) scale x a user exaggeration; the base
+        # is embedded so it fuses to the terrain. Unlike terrain relief, buildings
+        # are not driven by the terrain vertical_scale — they have their own knob.
+        gz = surface[vbid] + (h - ground[vbid]) * proj.scale * height_scale - EMBED_MM
         out_v = np.column_stack([gx, gy, gz])
 
         keep_face = keep_b[vbid[faces[:, 0]]]

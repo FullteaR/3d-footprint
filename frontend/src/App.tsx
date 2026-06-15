@@ -15,6 +15,7 @@ export function App() {
   const [trackWidth, setTrackWidth] = useState(1.2);
   const [trackHeight, setTrackHeight] = useState(1.5);
   const [includeBuildings, setIncludeBuildings] = useState(false);
+  const [buildingScale, setBuildingScale] = useState(10);
   const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
@@ -39,13 +40,14 @@ export function App() {
       f.append("track_width_mm", String(trackWidth));
       f.append("track_height_mm", String(trackHeight));
       f.append("include_buildings", String(includeBuildings));
+      f.append("building_scale", String(buildingScale));
       f.append("terrain_color", terrainColor);
       f.append("track_color", trackColor);
       f.append("building_color", buildingColor);
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, terrainColor, trackColor, buildingColor]
+    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, terrainColor, trackColor, buildingColor]
   );
 
   const LANDUSE_LEGEND: [string, string][] = [
@@ -173,6 +175,10 @@ export function App() {
             <>
               <div style={{ fontSize: 12, color: "#888", margin: "0 0 0.4rem" }}>
                 PLATEAU整備済みの都市のみ（LOD2/LOD1）。初回は建物データのDLに時間がかかります。
+              </div>
+              <div style={row}>
+                <label>建物の高さ強調 ×{buildingScale}</label>
+                <input style={{ flex: 1 }} type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
               </div>
               <div style={row}>
                 <label>建物の色</label>

@@ -30,6 +30,7 @@ def generate(
     track_height_mm: float = Form(1.5),
     include_track: bool = Form(True),
     include_buildings: bool = Form(False),
+    building_scale: float = Form(1.0),
     landuse: bool = Form(False),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
@@ -55,7 +56,7 @@ def generate(
         cat_grid = resolve_category_grid(grid) if landuse else None
         bodies: list[Body] = terrain_solid(proj, cat_grid)  # one solid per colour
         if include_buildings:
-            building_body = PlateauBuildingProvider().building_body(proj)
+            building_body = PlateauBuildingProvider().building_body(proj, building_scale)
             if building_body is not None:
                 bodies.append(building_body)
         if include_track:
