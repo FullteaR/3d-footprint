@@ -27,6 +27,7 @@ from typing import Protocol
 import numpy as np
 import requests
 from PIL import Image, ImageDraw
+from scipy.ndimage import gaussian_filter, maximum_filter
 
 from ..config import DATA_DIR
 from .terrain import ElevationGrid
@@ -260,6 +261,12 @@ class PlateauLuseProvider:
 
         lon2d, lat2d = np.meshgrid(grid.lons, grid.lats)
         out = np.full(lon2d.shape, "other", dtype="<U8")
+        # DEM cell size in raster pixels -> conservative-water footprint. Thin
+        # PLATEAU waterways (canals) are ~1 px wide; plain sampling aliases them
+        # into broken dots, so we dilate the water channel by about one DEM cell
+        # and let water win, keeping fine waterways connected.
+        dlon = float(np.mean(np.abs(np.diff(grid.lons)))) if grid.lons.size > 1 else MESH2_DLON
+        foot = int(np.clip((int(round(dlon / MESH2_DLON * PLATEAU_PX)) | 1), 3, 7))
         any_cover = False
         for mesh, mesh_urls in urls.items():
             lon0, lat0 = _mesh2_origin(mesh)
@@ -279,28 +286,91 @@ class PlateauLuseProvider:
                 any_cover = True
                 idx = raster[rows, cols]
                 names = np.array([CATEGORIES[int(v)] for v in idx], dtype="<U8")
-                # Later cities only fill cells the earlier ones left as "other".
+                water = maximum_filter(
+                    (raster == _CAT_IDX["water"]).astype(np.uint8), size=foot
+                )
+                names[water[rows, cols] > 0] = "water"
+                # Fill cells earlier cities left as "other"; water always wins.
                 sub = out[m]
-                fill = sub == "other"
-                sub[fill] = names[fill]
+                take = (sub == "other") | (names == "water")
+                sub[take] = names[take]
                 out[m] = sub
         return out if any_cover else None
 
 
-def resolve_category_grid(grid: ElevationGrid) -> np.ndarray | None:
-    """PLATEAU luse if the area is covered, else 国土数値情報 raster fallback."""
-    cat = PlateauLuseProvider().category_grid(grid)
-    if cat is None:
+def _cell_size_m(grid: ElevationGrid) -> float:
+    """Approximate ground size (m) of one DEM grid cell (x/y averaged)."""
+    lat_mid = float(np.mean(grid.lats))
+    dlon, dlat = np.abs(np.diff(grid.lons)), np.abs(np.diff(grid.lats))
+    dx = float(np.mean(dlon)) * 111320.0 * math.cos(math.radians(lat_mid)) if dlon.size else 0.0
+    dy = float(np.mean(dlat)) * 110540.0 if dlat.size else 0.0
+    vals = [v for v in (dx, dy) if v > 0]
+    return sum(vals) / len(vals) if vals else 1.0
+
+
+def _smooth_categories(cat: np.ndarray, sigma_cells: float) -> np.ndarray:
+    """Round hard categorical block edges into natural-looking boundaries.
+
+    Land-use rasters paint right-angle blocks at the source mesh resolution (the
+    100 m KSJ fallback especially), which read as coarse staircases on the finer
+    DEM grid. Category names are nominal and can't be blurred directly, so each
+    category becomes a 0/1 indicator field; every field is Gaussian-blurred and
+    each cell takes the argmax category. Blurring rounds the corners while the
+    argmax keeps clean — but now curved — borders, with speckle absorbed.
+    """
+    sigma = min(sigma_cells, 12.0)  # cap so tiny-cell grids don't blur to mush
+    if sigma < 0.5:
+        return cat
+    cats = np.unique(cat)
+    if cats.size < 2:
+        return cat
+    stack = np.stack([
+        gaussian_filter((cat == c).astype(np.float32), sigma, mode="nearest")
+        for c in cats
+    ])
+    return cats[np.argmax(stack, axis=0)]
+
+
+def resolve_category_grid(
+    grid: ElevationGrid, smooth_m: float = 60.0
+) -> tuple[np.ndarray, bool]:
+    """Return ``(category_grid, used_plateau)`` for the DEM grid.
+
+    PLATEAU luse is used if the area is covered, else the 国土数値情報 raster
+    fallback. `smooth_m` rounds the nominal land-use borders over roughly that
+    ground distance (0 disables), turning the coarse source-mesh staircase —
+    worst in the 100 m KSJ-only areas — into natural curves.
+
+    PLATEAU is already fine ~5 m vector data whose urban borders are genuinely
+    straight (parcels, roads, reclaimed coastlines), so heavy smoothing there
+    just blurs real detail and bends lines that should be straight. Where
+    PLATEAU covers, smoothing is capped to ~one grid cell; the caller also dials
+    the contour curving down so those edges stay crisp. `used_plateau` reports
+    which regime applied.
+    """
+    plateau = PlateauLuseProvider().category_grid(grid)
+    used_plateau = plateau is not None
+    if not used_plateau:
         cat = KsjRasterProvider().category_grid(grid)
     else:
         # PLATEAU land-use only classifies parcels, so water surfaces (rivers)
         # and odd gaps fall through to "other". Fill those cells from the
         # nationwide KSJ raster, which classifies water/everything.
+        cat = plateau
         gap = cat == "other"
         if gap.any():
             ksj = KsjRasterProvider().category_grid(grid)
             cat = cat.copy()
             cat[gap] = ksj[gap]
+    # Smooth the (nominal) land-use borders before the sea is stamped in, so the
+    # real DEM coastline stays crisp while the inland colour blocks get rounded.
+    eff = min(smooth_m, _cell_size_m(grid)) if used_plateau else smooth_m
+    if eff > 0:
+        pre_water = cat == "water"
+        cat = _smooth_categories(cat, eff / _cell_size_m(grid))
+        if used_plateau and pre_water.any():
+            # Keep PLATEAU's thin waterways; the despeckle pass would erase them.
+            cat = np.where(pre_water, "water", cat)
     # Open sea (e.g. Tokyo Bay) is not classified by either land-use source and
     # the GSI DEM returns no-data there; treat those cells as water so the sea
     # is not left as the generic "other"/building-like colour.
@@ -308,4 +378,4 @@ def resolve_category_grid(grid: ElevationGrid) -> np.ndarray | None:
     if sea.any():
         cat = cat.copy()
         cat[sea] = "water"
-    return cat
+    return cat, used_plateau

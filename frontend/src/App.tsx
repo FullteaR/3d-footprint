@@ -11,6 +11,7 @@ export function App() {
   const [verticalScale, setVerticalScale] = useState(1);
   const [baseThickness, setBaseThickness] = useState(3);
   const [landuse, setLanduse] = useState(false);
+  const [landuseSmooth, setLanduseSmooth] = useState(60);
   const [includeTrack, setIncludeTrack] = useState(true);
   const [trackWidth, setTrackWidth] = useState(1.2);
   const [trackHeight, setTrackHeight] = useState(1.5);
@@ -36,6 +37,7 @@ export function App() {
       f.append("vertical_scale", String(verticalScale));
       f.append("base_thickness_mm", String(baseThickness));
       f.append("landuse", String(landuse));
+      f.append("landuse_smooth_m", String(landuseSmooth));
       f.append("include_track", String(includeTrack));
       f.append("track_width_mm", String(trackWidth));
       f.append("track_height_mm", String(trackHeight));
@@ -47,7 +49,7 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, terrainColor, trackColor, buildingColor]
+    [file, sizeMm, verticalScale, baseThickness, landuse, landuseSmooth, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, terrainColor, trackColor, buildingColor]
   );
 
   const LANDUSE_LEGEND: [string, string][] = [
@@ -144,6 +146,17 @@ export function App() {
               <label>地形の色</label>
               <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />
             </div>
+          )}
+          {landuse && (
+            <>
+              <div style={row}>
+                <label>色分けのなめらかさ {landuseSmooth}m</label>
+                <input style={{ flex: 1 }} type="range" min={0} max={200} step={10} value={landuseSmooth} onChange={(e) => setLanduseSmooth(Number(e.target.value))} />
+              </div>
+              <div style={{ fontSize: 11, color: "#888", margin: "-0.3rem 0 0.4rem" }}>
+                0で補完オフ（生のマス目）。上げるほど境界を曲線化＋色を統合（PLATEAU域は自動で控えめ）。
+              </div>
+            </>
           )}
 
           <hr style={{ border: 0, borderTop: "1px solid #eee" }} />

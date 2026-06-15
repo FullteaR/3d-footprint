@@ -32,6 +32,7 @@ def generate(
     include_buildings: bool = Form(False),
     building_scale: float = Form(1.0),
     landuse: bool = Form(False),
+    landuse_smooth_m: float = Form(60.0),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
     building_color: str = Form("#b0b0b0"),
@@ -53,8 +54,16 @@ def generate(
             ),
         )
 
-        cat_grid = resolve_category_grid(grid) if landuse else None
-        bodies: list[Body] = terrain_solid(proj, cat_grid)  # one solid per colour
+        cat_grid = None
+        if landuse:
+            # PLATEAU vs KSJ regime (affects only how much the categories are
+            # smoothed) is decided inside the resolver; border straightening in
+            # terrain_solid then keeps straight edges straight regardless.
+            cat_grid, _ = resolve_category_grid(grid, landuse_smooth_m)
+        # smoothness 0 => no naturalisation at all (raw grid-cell squares).
+        bodies: list[Body] = terrain_solid(
+            proj, cat_grid, naturalize=landuse_smooth_m > 0
+        )
         if include_buildings:
             building_body = PlateauBuildingProvider().building_body(proj, building_scale)
             if building_body is not None:
