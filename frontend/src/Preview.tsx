@@ -77,9 +77,11 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
       const model = gltf.scene;
       model.rotation.x = -Math.PI / 2; // Z-up (mm) -> Y-up
 
-      // Replace trimesh's PBR/metallic material with a flat, non-metallic one
-      // so the per-face colors read true and bright. DoubleSide keeps building
-      // faces (whose source normals are inconsistent) from rendering dark.
+      // Replace trimesh's PBR/metallic material with a non-metallic one so the
+      // per-body colors read true and bright. Smooth shading (flatShading off)
+      // uses the crease-smoothed normals the backend baked: terrain shades as a
+      // surface while walls/rims/building edges stay crisp. DoubleSide keeps
+      // building faces (whose source normals are inconsistent) from going dark.
       model.traverse((o) => {
         const mesh = o as THREE.Mesh;
         if (!mesh.isMesh) return;
@@ -90,7 +92,7 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
           metalness: 0,
           roughness: 0.85,
           side: THREE.DoubleSide,
-          flatShading: true,
+          flatShading: false,
         });
       });
 

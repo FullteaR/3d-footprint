@@ -39,6 +39,48 @@ _FORMATS = {
     "glb": ("model/gltf-binary", "glb"),
 }
 
+# Preview-only: dihedral threshold (deg) below which adjacent faces share a
+# smooth normal. Gentle terrain slopes fall under it (smooth-shaded relief);
+# walls, top rims and building corners (~90 deg) stay above it (crisp).
+_GLB_CREASE_DEG = 40.0
+
+
+def _creased_normals(mesh: trimesh.Trimesh, angle_deg: float) -> trimesh.Trimesh:
+    """Return a copy whose normals are smoothed only across sub-`angle` edges.
+
+    The terrain solid bakes flat per-face normals (every triangle reads as a
+    hard facet) — fine for printing, ugly in the live preview. We re-split the
+    mesh by *smooth group*: faces joined through edges gentler than `angle` form
+    one group and share averaged normals; sharper edges keep the two sides
+    separate (flat). Same idea as three's `toCreasedNormals`, done server-side.
+    """
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    faces = mesh.faces
+    nf = len(faces)
+    adj = mesh.face_adjacency
+    smooth = mesh.face_adjacency_angles < np.radians(angle_deg)
+    e = adj[smooth]
+    graph = sp.coo_matrix(
+        (np.ones(len(e), bool), (e[:, 0], e[:, 1])), shape=(nf, nf)
+    )
+    _, group = connected_components(graph, directed=False)
+
+    # Each (original vertex, smooth group) becomes one output vertex.
+    fv = faces.reshape(-1)               # 3*nf corner -> original vertex id
+    fg = np.repeat(group, 3)             # 3*nf corner -> smooth group id
+    key, inv = np.unique(np.stack([fv, fg], 1), axis=0, return_inverse=True)
+    inv = inv.ravel()
+    out = trimesh.Trimesh(
+        vertices=mesh.vertices[key[:, 0]], faces=inv.reshape(-1, 3), process=False
+    )
+    vn = np.zeros((len(key), 3))
+    np.add.at(vn, inv, np.repeat(mesh.face_normals, 3, axis=0))
+    norm = np.linalg.norm(vn, axis=1, keepdims=True)
+    out.vertex_normals = vn / np.where(norm > 0, norm, 1.0)
+    return out
+
 
 @dataclass
 class Body:
@@ -77,10 +119,23 @@ def export_bodies(
     elif fmt == "glb":
         scene = trimesh.Scene()
         for i, b in enumerate(bodies):
-            m = b.mesh.copy()
-            m.unmerge_vertices()  # crisp per-face colors (no boundary averaging)
-            rgb = np.array([palette[index_of[l]][1] for l in b.face_labels()], dtype=np.uint8)
-            m.visual.face_colors = np.column_stack([rgb, np.full(len(rgb), 255, np.uint8)])
+            labels = b.face_labels()
+            uniq = np.unique(labels)
+            if uniq.size == 1:
+                # Single-colour body: crease-smooth so the relief shades as a
+                # surface, not facets, then paint one uniform colour. Boundaries
+                # stay crisp because each colour is its own mesh.
+                m = _creased_normals(b.mesh, _GLB_CREASE_DEG)
+                rgb = palette[index_of[uniq[0]]][1]
+                m.visual.vertex_colors = np.tile(
+                    np.array([*rgb, 255], np.uint8), (len(m.vertices), 1)
+                )
+            else:
+                # Multi-colour body: unmerge for crisp per-face colour (flat).
+                m = b.mesh.copy()
+                m.unmerge_vertices()
+                rgb = np.array([palette[index_of[l]][1] for l in labels], np.uint8)
+                m.visual.face_colors = np.column_stack([rgb, np.full(len(rgb), 255, np.uint8)])
             scene.add_geometry(m, geom_name=f"body{i}")
         data = scene.export(file_type="glb")
     else:  # 3mf
