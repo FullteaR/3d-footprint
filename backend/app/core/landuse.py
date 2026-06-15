@@ -27,7 +27,7 @@ from typing import Protocol
 import numpy as np
 import requests
 from PIL import Image, ImageDraw
-from scipy.ndimage import gaussian_filter, maximum_filter
+from scipy.ndimage import binary_opening, gaussian_filter, label, maximum_filter
 
 from ..config import DATA_DIR
 from .terrain import ElevationGrid
@@ -156,6 +156,21 @@ _LU_NS = {
     "luse": "http://www.opengis.net/citygml/landuse/2.0",
     "gml": "http://www.opengis.net/gml",
 }
+_WATERBODY_TAG = "{http://www.opengis.net/citygml/waterbody/2.0}WaterBody"
+_WTR_CLASS_TAG = "{http://www.opengis.net/citygml/waterbody/2.0}class"
+_WTR_SEA_CLASS = "1030"  # PLATEAU WaterBody class 海(sea); covered already by GSI
+_POSLIST_TAG = "{http://www.opengis.net/gml}posList"
+
+
+def _capture_thin_water(mask: np.ndarray, foot: int) -> np.ndarray:
+    """Dilate only *thin* water (mask minus its morphological opening) by `foot`.
+
+    Keeps narrow rivers/canals connected through the coarse DEM sampling while
+    leaving large bodies (sea, wide rivers) at their true edge — dilating those
+    would erode the coast and pinch a thin cape into an island.
+    """
+    thin = mask & ~binary_opening(mask, iterations=max(1, foot // 2))
+    return mask | (maximum_filter(thin.astype(np.uint8), size=foot) > 0)
 
 # PLATEAU Common_landUseType code -> canonical category.
 _PLATEAU_TO_CAT = {
@@ -200,14 +215,19 @@ def _mesh2_origin(code: str) -> tuple[float, float]:
 
 
 class PlateauLuseProvider:
-    """PLATEAU 土地利用 (luse) provider. Covers PLATEAU cities only."""
+    """PLATEAU land-cover provider (土地利用 luse + 水部 wtr). PLATEAU cities only.
 
-    def _luse_urls(self, codes: list[str]) -> dict[str, list[str]]:
-        """Map each covered mesh code -> luse GML URLs (one per covering city)."""
-        wanted = set(codes)
+    Land use gives the base categories; the dedicated water-body model (wtr) is
+    overlaid on top as authoritative rivers/lakes/sea (more accurate than luse's
+    "水面" parcels).
+    """
+
+    @staticmethod
+    def _urls_by_mesh(cities: list[dict], key: str, wanted: set) -> dict[str, list[str]]:
+        """Map covered mesh code -> GML URLs of `files[key]` (one per city)."""
         out: dict[str, list[str]] = {}
-        for city in fetch_datacatalog_cities(codes):
-            for entry in city.get("files", {}).get("luse", []) or []:
+        for city in cities:
+            for entry in city.get("files", {}).get(key, []) or []:
                 mesh = str(entry.get("code"))
                 if mesh in wanted and entry.get("url"):
                     out.setdefault(mesh, []).append(entry["url"])
@@ -253,22 +273,68 @@ class PlateauLuseProvider:
         img.save(cache)
         return np.array(img)
 
+    def _water_mask(self, mesh: str, url: str) -> np.ndarray | None:
+        """Binary water raster (PLATEAU_PX^2 bool) for one wtr WaterBody GML, cached.
+
+        Fills every WaterBody surface footprint; LOD2 vertical side faces project
+        to zero-area lines and harmlessly add nothing.
+        """
+        key = hashlib.sha1(url.encode()).hexdigest()[:16]
+        cache = DATA_DIR / "landuse" / "plateau" / f"wtr_nosea_{mesh}_{key}.png"
+        if cache.is_file():
+            return np.array(Image.open(cache)) > 0
+
+        lon0, lat0 = _mesh2_origin(mesh)
+        lat_n = lat0 + MESH2_DLAT
+        img = Image.new("L", (PLATEAU_PX, PLATEAU_PX), 0)
+        draw = ImageDraw.Draw(img)
+        try:
+            with requests.get(
+                url, headers={"User-Agent": "3d-footprint/0.1"}, stream=True, timeout=300
+            ) as resp:
+                resp.raise_for_status()
+                resp.raw.decode_content = True
+                from lxml import etree
+
+                for _, el in etree.iterparse(resp.raw, tag=_WATERBODY_TAG):
+                    cls = el.find(_WTR_CLASS_TAG)
+                    # Skip 海 (sea): its polygon is generalised and would flood
+                    # reclaimed land; the open sea comes from the GSI no-data mask.
+                    if cls is None or cls.text != _WTR_SEA_CLASS:
+                        for pos in el.iter(_POSLIST_TAG):
+                            vals = pos.text.split()
+                            lat = np.array(vals[0::3], dtype=float)
+                            lon = np.array(vals[1::3], dtype=float)
+                            col = (lon - lon0) / MESH2_DLON * PLATEAU_PX
+                            row = (lat_n - lat) / MESH2_DLAT * PLATEAU_PX
+                            if len(col) >= 3:
+                                draw.polygon(list(zip(col, row)), fill=1)
+                    el.clear()
+        except (requests.RequestException, OSError, ValueError):
+            return None
+
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        img.save(cache)
+        return np.array(img) > 0
+
     def category_grid(self, grid: ElevationGrid) -> np.ndarray | None:
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
-        urls = self._luse_urls(_mesh2_codes(bbox))
-        if not urls:
+        codes = _mesh2_codes(bbox)
+        wanted = set(codes)
+        cities = fetch_datacatalog_cities(codes)        # one datacatalog query
+        luse_urls = self._urls_by_mesh(cities, "luse", wanted)
+        wtr_urls = self._urls_by_mesh(cities, "wtr", wanted)
+        if not luse_urls and not wtr_urls:
             return None
 
         lon2d, lat2d = np.meshgrid(grid.lons, grid.lats)
         out = np.full(lon2d.shape, "other", dtype="<U8")
-        # DEM cell size in raster pixels -> conservative-water footprint. Thin
-        # PLATEAU waterways (canals) are ~1 px wide; plain sampling aliases them
-        # into broken dots, so we dilate the water channel by about one DEM cell
-        # and let water win, keeping fine waterways connected.
+        # DEM cell size in raster pixels -> thin-water footprint (see
+        # _capture_thin_water): keeps narrow rivers/canals connected.
         dlon = float(np.mean(np.abs(np.diff(grid.lons)))) if grid.lons.size > 1 else MESH2_DLON
         foot = int(np.clip((int(round(dlon / MESH2_DLON * PLATEAU_PX)) | 1), 3, 7))
-        any_cover = False
-        for mesh, mesh_urls in urls.items():
+
+        def mesh_nodes(mesh: str):
             lon0, lat0 = _mesh2_origin(mesh)
             lat_n = lat0 + MESH2_DLAT
             m = (
@@ -276,24 +342,52 @@ class PlateauLuseProvider:
                 & (lat2d >= lat0) & (lat2d < lat_n)
             )
             if not m.any():
-                continue
+                return None
             cols = np.clip((lon2d[m] - lon0) / MESH2_DLON * PLATEAU_PX, 0, PLATEAU_PX - 1).astype(int)
             rows = np.clip((lat_n - lat2d[m]) / MESH2_DLAT * PLATEAU_PX, 0, PLATEAU_PX - 1).astype(int)
+            return m, rows, cols
+
+        any_cover = False
+        # Base land use.
+        for mesh, mesh_urls in luse_urls.items():
+            nm = mesh_nodes(mesh)
+            if nm is None:
+                continue
+            m, rows, cols = nm
             for url in mesh_urls:
                 raster = self._raster(mesh, url)
                 if raster is None:
                     continue
                 any_cover = True
-                idx = raster[rows, cols]
-                names = np.array([CATEGORIES[int(v)] for v in idx], dtype="<U8")
-                water = maximum_filter(
-                    (raster == _CAT_IDX["water"]).astype(np.uint8), size=foot
-                )
-                names[water[rows, cols] > 0] = "water"
+                names = np.array([CATEGORIES[int(v)] for v in raster[rows, cols]], dtype="<U8")
+                wcap = _capture_thin_water(raster == _CAT_IDX["water"], foot)
+                names[wcap[rows, cols]] = "water"
                 # Fill cells earlier cities left as "other"; water always wins.
                 sub = out[m]
                 take = (sub == "other") | (names == "water")
                 sub[take] = names[take]
+                out[m] = sub
+        # PLATEAU water-body model (rivers/lakes/sea): authoritative water on top.
+        for mesh, mesh_urls in wtr_urls.items():
+            nm = mesh_nodes(mesh)
+            if nm is None:
+                continue
+            m, rows, cols = nm
+            for url in mesh_urls:
+                mask = self._water_mask(mesh, url)
+                if mask is None:
+                    continue
+                any_cover = True
+                wcap = _capture_thin_water(mask, foot)
+                sub = out[m]
+                # Add water only over land luse left ambiguous (bare/other) or
+                # already water. Keep luse's confident land classes (urban,
+                # forest, field): wtr's dense canal/small-water net over a city
+                # or park would otherwise read as "mostly water" at the coarse
+                # DEM cell size. Real rivers/lakes are luse "水面" too, so they
+                # are kept; luse-missed water in built/green areas is dropped.
+                keep_land = np.isin(sub, ["urban", "forest", "field"])
+                sub[wcap[rows, cols] & ~keep_land] = "water"
                 out[m] = sub
         return out if any_cover else None
 
@@ -331,6 +425,12 @@ def _smooth_categories(cat: np.ndarray, sigma_cells: float) -> np.ndarray:
     return cats[np.argmax(stack, axis=0)]
 
 
+# Above this elevation (m, T.P.), water that the smoothing *introduced* over
+# land (a flooded island/hill) is reverted; water the source classified as such
+# (a hilltop pond, a river) is kept. Coastal water at/under it is left alone.
+WATER_GUARD_M = 1.5
+
+
 def resolve_category_grid(
     grid: ElevationGrid, smooth_m: float = 60.0
 ) -> tuple[np.ndarray, bool]:
@@ -364,18 +464,32 @@ def resolve_category_grid(
             cat[gap] = ksj[gap]
     # Smooth the (nominal) land-use borders before the sea is stamped in, so the
     # real DEM coastline stays crisp while the inland colour blocks get rounded.
+    pre = cat                                   # land/water classes pre-smoothing
     eff = min(smooth_m, _cell_size_m(grid)) if used_plateau else smooth_m
     if eff > 0:
+        pre = cat.copy()
         pre_water = cat == "water"
         cat = _smooth_categories(cat, eff / _cell_size_m(grid))
         if used_plateau and pre_water.any():
             # Keep PLATEAU's thin waterways; the despeckle pass would erase them.
             cat = np.where(pre_water, "water", cat)
+    cat = cat.copy()
     # Open sea (e.g. Tokyo Bay) is not classified by either land-use source and
-    # the GSI DEM returns no-data there; treat those cells as water so the sea
-    # is not left as the generic "other"/building-like colour.
-    sea = ~np.isfinite(grid.elev)
-    if sea.any():
-        cat = cat.copy()
+    # the GSI DEM returns no-data there. Treat only the no-data that *connects to
+    # the map border* as sea, so an inland missing-tile gap isn't flooded blue.
+    elev = grid.elev
+    nodata = ~np.isfinite(elev)
+    if nodata.any():
+        lbl, _ = label(nodata)
+        border = np.unique(np.concatenate([lbl[0], lbl[-1], lbl[:, 0], lbl[:, -1]]))
+        sea = np.isin(lbl, border[border > 0])
         cat[sea] = "water"
+    # Don't let smoothing flood clearly-elevated *land* (a small island or hill)
+    # blue: where a cell is water well above sea level yet was land before
+    # smoothing, revert it to that land class. Genuine elevated water bodies (a
+    # hilltop pond, a river) were water before smoothing too (pre == "water"),
+    # so they are left untouched and stay blue.
+    bad = (cat == "water") & np.isfinite(elev) & (elev > WATER_GUARD_M)
+    if bad.any():
+        cat[bad] = pre[bad]
     return cat, used_plateau
