@@ -120,6 +120,30 @@ class KsjRasterProvider:
 # --------------------------------------------------------------------------- #
 
 DATACATALOG_URL = "https://api.plateauview.mlit.go.jp/datacatalog/citygml/m:{codes}"
+# The datacatalog rejects more than 30 mesh codes per request ("too many
+# bounds"). 3rd-level (bldg) meshes are ~1 km, so a multi-km route easily
+# exceeds this; query in chunks and merge.
+DATACATALOG_MAX_CODES = 30
+
+
+def fetch_datacatalog_cities(codes: list[str]) -> list[dict]:
+    """Return the merged ``cities`` list for ``codes``, chunked under the API cap."""
+    cities: list[dict] = []
+    for i in range(0, len(codes), DATACATALOG_MAX_CODES):
+        chunk = codes[i : i + DATACATALOG_MAX_CODES]
+        try:
+            resp = requests.get(
+                DATACATALOG_URL.format(codes=",".join(chunk)),
+                headers={"User-Agent": "3d-footprint/0.1"},
+                timeout=60,
+            )
+        except requests.RequestException:
+            continue
+        if resp.status_code == 200:
+            cities.extend(resp.json().get("cities", []))
+    return cities
+
+
 _OTHER_IDX = CATEGORIES.index("other")
 _CAT_IDX = {c: i for i, c in enumerate(CATEGORIES)}
 PLATEAU_PX = 2048        # raster size per 2nd-level mesh (~5 m/px)
@@ -179,19 +203,9 @@ class PlateauLuseProvider:
 
     def _luse_urls(self, codes: list[str]) -> dict[str, list[str]]:
         """Map each covered mesh code -> luse GML URLs (one per covering city)."""
-        try:
-            resp = requests.get(
-                DATACATALOG_URL.format(codes=",".join(codes)),
-                headers={"User-Agent": "3d-footprint/0.1"},
-                timeout=60,
-            )
-        except requests.RequestException:
-            return {}
-        if resp.status_code != 200:
-            return {}
         wanted = set(codes)
         out: dict[str, list[str]] = {}
-        for city in resp.json().get("cities", []):
+        for city in fetch_datacatalog_cities(codes):
             for entry in city.get("files", {}).get("luse", []) or []:
                 mesh = str(entry.get("code"))
                 if mesh in wanted and entry.get("url"):

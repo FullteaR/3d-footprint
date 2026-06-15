@@ -27,9 +27,8 @@ from lxml import etree
 
 from ..config import DATA_DIR
 from .export import Body
+from .landuse import fetch_datacatalog_cities
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
-
-DATACATALOG_URL = "https://api.plateauview.mlit.go.jp/datacatalog/citygml/m:{codes}"
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
 EMBED_MM = 0.5            # how far building bases sink into the terrain
@@ -153,19 +152,9 @@ class PlateauBuildingProvider:
     """PLATEAU LOD2/LOD1 building provider. Covers PLATEAU cities only."""
 
     def _bldg_urls(self, codes: list[str]) -> dict[str, str]:
-        try:
-            resp = requests.get(
-                DATACATALOG_URL.format(codes=",".join(codes)),
-                headers={"User-Agent": "3d-footprint/0.1"},
-                timeout=60,
-            )
-        except requests.RequestException:
-            return {}
-        if resp.status_code != 200:
-            return {}
         wanted = set(codes)
         out: dict[str, str] = {}
-        for city in resp.json().get("cities", []):
+        for city in fetch_datacatalog_cities(codes):
             for entry in city.get("files", {}).get("bldg", []) or []:
                 mesh = str(entry.get("code"))
                 if mesh in wanted and entry.get("url") and mesh not in out:
