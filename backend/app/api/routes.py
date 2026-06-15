@@ -33,8 +33,7 @@ def generate(
     landuse: bool = Form(False),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
-    roof_color: str = Form("#b5651d"),
-    wall_color: str = Form("#e6ddcb"),
+    building_color: str = Form("#b0b0b0"),
     dem_zoom: int = Form(14),
     grid_max: int = Form(400),
     fmt: str = Form("stl"),
@@ -65,7 +64,7 @@ def generate(
         # "terrain" label (land-use off) maps to the user's terrain color.
         colors = {
             "terrain": terrain_color, "track": track_color,
-            "roof": roof_color, "wall": wall_color,
+            "building": building_color,
         }
         data, content_type, ext = export_bodies(bodies, fmt, colors)
     except ValueError as e:

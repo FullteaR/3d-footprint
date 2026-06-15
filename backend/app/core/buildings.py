@@ -1,13 +1,15 @@
-"""PLATEAU LOD2 buildings -> printable solids sitting on the terrain.
+"""PLATEAU LOD2/LOD1 buildings -> printable solids sitting on the terrain.
 
 Source: PLATEAU CityGML `bldg` files (one per 3rd-level mesh, 8-digit code),
 resolved from a bbox via the same data-catalog API used for luse.
 
-Each building's surfaces are read from its semantic boundaries
+Each building uses its best available LOD: LOD2 semantic surfaces
 (`bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}` with lod2MultiSurface
-polygons). Buildings that only have LOD1 geometry (`bldg:lod1Solid`, a flat-top
-prism) are handled too: their polygons are classified roof/wall/ground by
-height. Ground polygons are dropped (the base is embedded into the terrain).
+polygons) when present, otherwise its LOD1 `bldg:lod1Solid` (a flat-top prism).
+All faces share a single "building" colour. At real-world scale a typical
+building is a fraction of a millimetre tall, so each is given a minimum visible
+protrusion above the terrain (see building_body); the base is embedded so it
+fuses to the surface.
 
 Polygons (lat/lon/height, EPSG 6697; height is 標高 T.P., same datum as the
 GSI DEM) are triangulated once and cached per mesh as a compact npz in
@@ -32,6 +34,11 @@ from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
 EMBED_MM = 0.5            # how far building bases sink into the terrain
+# Minimum height a building must clear above the terrain surface (mm). At real
+# scale a typical 7 m building is well under a millimetre, so without this most
+# of the city would sink below EMBED and vanish; short buildings are lifted to
+# this height (tall ones keep their true, scaled height).
+MIN_PROTRUDE_MM = 0.8
 
 _BLDG_NS = "http://www.opengis.net/citygml/building/2.0"
 _GML_NS = "http://www.opengis.net/gml"
@@ -223,16 +230,15 @@ class PlateauBuildingProvider:
         if not urls:
             return None
 
-        verts, faces, ftype, vbid = [], [], [], []
+        verts, faces, vbid = [], [], []
         voff = boff = 0
         for mesh, url in urls.items():
             geo = self._geometry(mesh, url)
             if geo is None or len(geo[0]) == 0:
                 continue
-            v, f, t, b = geo
+            v, f, _t, b = geo  # roof/wall type unused: buildings are one colour
             verts.append(v)
             faces.append(f + voff)
-            ftype.append(t)
             vbid.append(b + boff)
             voff += len(v)
             boff += int(b.max()) + 1 if len(b) else 0
@@ -241,7 +247,6 @@ class PlateauBuildingProvider:
 
         verts = np.vstack(verts)
         faces = np.vstack(faces)
-        ftype = np.concatenate(ftype)
         vbid = np.concatenate(vbid)
         lon, lat, h = verts[:, 0], verts[:, 1], verts[:, 2]
 
@@ -261,20 +266,28 @@ class PlateauBuildingProvider:
         np.logical_and.at(keep_b, vbid, inside)
         surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
 
+        # Per-building height in mm at print scale, and the exaggeration needed so
+        # each building clears MIN_PROTRUDE_MM above the surface (1.0 = true height).
+        bh_mm = np.zeros(nb)
+        np.maximum.at(bh_mm, vbid, (h - ground[vbid]) * proj.scale)
+        vscale = np.maximum(
+            1.0,
+            np.divide(MIN_PROTRUDE_MM + EMBED_MM, bh_mm,
+                      out=np.ones(nb), where=bh_mm > 1e-6),
+        )
+
         gx = proj.x_of(lon)
         gy = proj.y_of(lat)
-        gz = surface[vbid] + (h - ground[vbid]) * proj.scale - EMBED_MM
+        gz = surface[vbid] + (h - ground[vbid]) * proj.scale * vscale[vbid] - EMBED_MM
         out_v = np.column_stack([gx, gy, gz])
 
         keep_face = keep_b[vbid[faces[:, 0]]]
         faces = faces[keep_face]
-        ftype = ftype[keep_face]
         if len(faces) == 0:
             return None
 
-        # process=False preserves face order so per-face labels stay aligned;
-        # merge_vertices welds the shared surface edges (keeps face count).
+        # process=False preserves face order; merge_vertices welds shared edges.
+        # All faces share one "building" colour (roof/wall is not distinguished).
         mesh = trimesh.Trimesh(vertices=out_v, faces=faces, process=False)
         mesh.merge_vertices()
-        labels = np.array([_LABELS[t] for t in ftype], dtype="<U8")
-        return Body(mesh, labels)
+        return Body(mesh, "building")

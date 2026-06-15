@@ -17,8 +17,7 @@ export function App() {
   const [includeBuildings, setIncludeBuildings] = useState(false);
   const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
-  const [roofColor, setRoofColor] = useState("#b5651d");
-  const [wallColor, setWallColor] = useState("#e6ddcb");
+  const [buildingColor, setBuildingColor] = useState("#b0b0b0");
   const [fmt, setFmt] = useState("3mf");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -42,12 +41,11 @@ export function App() {
       f.append("include_buildings", String(includeBuildings));
       f.append("terrain_color", terrainColor);
       f.append("track_color", trackColor);
-      f.append("roof_color", roofColor);
-      f.append("wall_color", wallColor);
+      f.append("building_color", buildingColor);
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, terrainColor, trackColor, roofColor, wallColor]
+    [file, sizeMm, verticalScale, baseThickness, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, terrainColor, trackColor, buildingColor]
   );
 
   const LANDUSE_LEGEND: [string, string][] = [
@@ -174,15 +172,11 @@ export function App() {
           {includeBuildings && (
             <>
               <div style={{ fontSize: 12, color: "#888", margin: "0 0 0.4rem" }}>
-                PLATEAU整備済みの都市のみ。初回は建物データのDLに時間がかかります。
+                PLATEAU整備済みの都市のみ（LOD2/LOD1）。初回は建物データのDLに時間がかかります。
               </div>
               <div style={row}>
-                <label>屋根の色</label>
-                <input type="color" value={roofColor} onChange={(e) => setRoofColor(e.target.value)} />
-              </div>
-              <div style={row}>
-                <label>壁の色</label>
-                <input type="color" value={wallColor} onChange={(e) => setWallColor(e.target.value)} />
+                <label>建物の色</label>
+                <input type="color" value={buildingColor} onChange={(e) => setBuildingColor(e.target.value)} />
               </div>
             </>
           )}
