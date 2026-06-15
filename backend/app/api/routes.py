@@ -54,8 +54,7 @@ def generate(
         )
 
         cat_grid = resolve_category_grid(grid) if landuse else None
-        terrain_mesh, terrain_labels = terrain_solid(proj, cat_grid)
-        bodies: list[Body] = [Body(terrain_mesh, terrain_labels)]
+        bodies: list[Body] = terrain_solid(proj, cat_grid)  # one solid per colour
         if include_buildings:
             building_body = PlateauBuildingProvider().building_body(proj)
             if building_body is not None:

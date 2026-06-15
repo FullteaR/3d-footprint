@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import trimesh
 
+from .export import Body
 from .terrain import ElevationGrid
 
 # Equirectangular metres-per-degree about the scene centre.
@@ -91,12 +92,19 @@ def make_projection(grid: ElevationGrid, params: MeshParams) -> Projection:
 
 def terrain_solid(
     proj: Projection, category_grid: np.ndarray | None = None
-) -> tuple[trimesh.Trimesh, np.ndarray]:
-    """Build a closed terrain mesh and per-face labels.
+) -> list[Body]:
+    """Build the terrain as one watertight solid *per colour*, full-height.
 
-    Top faces are labelled by land-use category (when `category_grid` is given,
-    a (ny, nx) array of category names); the bottom and walls are labelled
-    "base". Returns (mesh, face_labels) with face order preserved.
+    Rather than a single base slab carrying a thin coloured skin on top, each
+    land-use colour becomes its own closed solid running from the terrain
+    surface straight down to the flat base. Splitting by colour (stl_multi, or
+    per-object 3MF) then yields independent, printable solids whose colour spans
+    the whole height — which is what a multi-material printer needs.
+
+    A colour's solid is the boundary of its columns: the top surface cells, the
+    flat bottom cells, and vertical walls only on edges where the neighbour is a
+    *different* colour or off-grid (shared edges between same-colour cells are
+    interior, so no wall). Returns one `Body` per colour.
     """
     grid = proj.grid
     ny, nx = grid.elev.shape
@@ -111,52 +119,55 @@ def terrain_solid(
     vertices = np.vstack([top, bot])
     n_top = ny * nx
 
-    def tidx(r, c):
-        return r * nx + c
-
-    def bidx(r, c):
-        return n_top + r * nx + c
-
-    r = np.arange(ny - 1)[:, None]
-    c = np.arange(nx - 1)[None, :]
-    v00 = (r * nx + c).ravel()
-    v01 = (r * nx + c + 1).ravel()
-    v10 = ((r + 1) * nx + c).ravel()
-    v11 = ((r + 1) * nx + c + 1).ravel()
-    top_faces = np.concatenate(
-        [np.column_stack([v00, v10, v11]), np.column_stack([v00, v11, v01])]
-    )
-    n_cells = (ny - 1) * (nx - 1)
-    bot_faces = top_faces[:, ::-1] + n_top
-
-    def wall(seq):
-        out = []
-        for (r0, c0), (r1, c1) in zip(seq[:-1], seq[1:]):
-            ta, tb = tidx(r0, c0), tidx(r1, c1)
-            ba, bb = bidx(r0, c0), bidx(r1, c1)
-            out.append([ta, tb, bb])
-            out.append([ta, bb, ba])
-        return out
-
-    border = (
-        [(0, cc) for cc in range(nx)]
-        + [(rr, nx - 1) for rr in range(1, ny)]
-        + [(ny - 1, cc) for cc in range(nx - 2, -1, -1)]
-        + [(rr, 0) for rr in range(ny - 2, -1, -1)]
-    )
-    wall_faces = np.array(wall(border), dtype=np.int64)
-    faces = np.vstack([top_faces, bot_faces, wall_faces])
-
-    # Per-face labels (same order as `faces`): top by category, rest "base".
     if category_grid is not None:
-        cell_cat = category_grid[:-1, :-1].ravel()  # one category per grid cell
+        cell_cat = np.asarray(category_grid)[:-1, :-1]   # one category per cell
     else:
-        cell_cat = np.full(n_cells, "terrain", dtype="<U8")
-    top_labels = np.concatenate([cell_cat, cell_cat])  # two triangles per cell
-    base_labels = np.full(len(bot_faces) + len(wall_faces), "base", dtype="<U8")
-    labels = np.concatenate([top_labels, base_labels])
+        cell_cat = np.full((ny - 1, nx - 1), "terrain", dtype="<U8")
 
-    # process=False keeps face order (vertices are already shared by index).
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-    mesh.fix_normals()
-    return mesh, labels
+    bodies: list[Body] = []
+    for color in np.unique(cell_cat):
+        m = cell_cat == color                    # (ny-1, nx-1) cells of this colour
+        rr, cc = np.nonzero(m)
+        if rr.size == 0:
+            continue
+        tl = rr * nx + cc                        # cell corner -> top vertex index
+        tr = rr * nx + cc + 1
+        bl = (rr + 1) * nx + cc
+        br = (rr + 1) * nx + cc + 1
+        blocks = [
+            np.column_stack([tl, bl, br]),       # top surface (2 tris/cell)
+            np.column_stack([tl, br, tr]),
+            np.column_stack([tl + n_top, br + n_top, bl + n_top]),   # flat bottom
+            np.column_stack([tl + n_top, tr + n_top, br + n_top]),
+        ]
+
+        # Vertical walls on this colour's boundary edges only. Winding is fixed
+        # afterwards by fix_normals (the per-colour solid is closed).
+        def wall(sel: np.ndarray, a: tuple[int, int], b: tuple[int, int]) -> None:
+            ra, ca = np.nonzero(sel)
+            if ra.size == 0:
+                return
+            ta = (ra + a[0]) * nx + (ca + a[1])
+            tb = (ra + b[0]) * nx + (ca + b[1])
+            blocks.append(np.column_stack([ta, tb, tb + n_top]))
+            blocks.append(np.column_stack([ta, tb + n_top, ta + n_top]))
+
+        east = m.copy();  east[:, :-1] &= ~m[:, 1:]    # right edge  (TR..BR)
+        west = m.copy();  west[:, 1:] &= ~m[:, :-1]    # left edge   (BL..TL)
+        north = m.copy(); north[1:, :] &= ~m[:-1, :]   # upper edge  (TL..TR)
+        south = m.copy(); south[:-1, :] &= ~m[1:, :]   # lower edge  (BR..BL)
+        wall(east,  (0, 1), (1, 1))
+        wall(west,  (1, 0), (0, 0))
+        wall(north, (0, 0), (0, 1))
+        wall(south, (1, 1), (1, 0))
+
+        faces = np.vstack(blocks)
+        used = np.unique(faces)                  # compact to referenced vertices
+        remap = np.empty(len(vertices), np.int64)
+        remap[used] = np.arange(used.size)
+        mesh = trimesh.Trimesh(
+            vertices=vertices[used], faces=remap[faces], process=False
+        )
+        mesh.fix_normals()
+        bodies.append(Body(mesh, str(color)))
+    return bodies
