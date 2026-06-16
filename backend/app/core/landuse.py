@@ -163,6 +163,8 @@ _POSLIST_TAG = "{http://www.opengis.net/gml}posList"
 # veg: only PlantCover (area vegetation) is used as a green overlay; the
 # heavy SolitaryVegetationObject (individual trees) is intentionally skipped.
 _PLANTCOVER_TAG = "{http://www.opengis.net/citygml/vegetation/2.0}PlantCover"
+# tran: Road surfaces (flat, draped on the ground) painted as an asphalt overlay.
+_ROAD_TAG = "{http://www.opengis.net/citygml/transportation/2.0}Road"
 
 
 def _capture_thin_water(mask: np.ndarray, foot: int) -> np.ndarray:
@@ -327,17 +329,20 @@ class PlateauLuseProvider:
         img.save(cache)
         return np.array(img) > 0
 
-    def _veg_mask(self, mesh: str, url: str) -> np.ndarray | None:
-        """Binary vegetation raster (PLATEAU_PX^2 bool) for one veg GML, cached.
+    def _surface_mask(
+        self, mesh: str, url: str, tag: str, prefix: str
+    ) -> np.ndarray | None:
+        """Binary footprint raster (PLATEAU_PX^2 bool) of every `tag` feature's
+        polygons in one GML, cached as ``{prefix}_{mesh}_{hash}.png``.
 
-        Only PlantCover (area vegetation) footprints are filled; the per-tree
-        SolitaryVegetationObject features are skipped (too heavy, and add no
-        meaningful colour at the print's ground resolution). `mesh` is the
-        containing 2nd-level mesh, so polygons land in the right sub-region of
-        the mesh raster even though veg files cover one 3rd-level mesh each.
+        Shared by the flat ground overlays — veg PlantCover (area vegetation;
+        the per-tree SolitaryVegetationObject is skipped) and tran Road (road
+        surfaces draped at ground level). `mesh` is the containing 2nd-level
+        mesh, so polygons land in the right sub-region even though veg/tran
+        files each cover one 3rd-level mesh.
         """
         key = hashlib.sha1(url.encode()).hexdigest()[:16]
-        cache = DATA_DIR / "landuse" / "plateau" / f"veg_{mesh}_{key}.png"
+        cache = DATA_DIR / "landuse" / "plateau" / f"{prefix}_{mesh}_{key}.png"
         if cache.is_file():
             return np.array(Image.open(cache)) > 0
 
@@ -353,7 +358,7 @@ class PlateauLuseProvider:
                 resp.raw.decode_content = True
                 from lxml import etree
 
-                for _, el in etree.iterparse(resp.raw, tag=_PLANTCOVER_TAG):
+                for _, el in etree.iterparse(resp.raw, tag=tag):
                     for pos in el.iter(_POSLIST_TAG):
                         vals = pos.text.split()
                         lat = np.array(vals[0::3], dtype=float)
@@ -377,13 +382,20 @@ class PlateauLuseProvider:
         cities = fetch_datacatalog_cities(codes)        # one datacatalog query
         luse_urls = self._urls_by_mesh(cities, "luse", wanted)
         wtr_urls = self._urls_by_mesh(cities, "wtr", wanted)
-        # veg files are 3rd-level (8-digit); regroup under their 2nd-level mesh so
-        # they overlay through the same per-mesh raster path as luse/wtr.
+        # veg/tran files are 3rd-level (8-digit); regroup under their 2nd-level
+        # mesh so they overlay through the same per-mesh raster path as luse/wtr.
         veg_urls = self._urls_by_mesh(cities, "veg", wanted)
-        veg_by_mesh2: dict[str, list[str]] = {}
-        for code8, urls in veg_urls.items():
-            veg_by_mesh2.setdefault(code8[:6], []).extend(urls)
-        if not luse_urls and not wtr_urls and not veg_urls:
+        tran_urls = self._urls_by_mesh(cities, "tran", wanted)
+
+        def by_mesh2(urls_by_code: dict[str, list[str]]) -> dict[str, list[str]]:
+            grouped: dict[str, list[str]] = {}
+            for code8, urls in urls_by_code.items():
+                grouped.setdefault(code8[:6], []).extend(urls)
+            return grouped
+
+        veg_by_mesh2 = by_mesh2(veg_urls)
+        tran_by_mesh2 = by_mesh2(tran_urls)
+        if not (luse_urls or wtr_urls or veg_urls or tran_urls):
             return None
 
         lon2d, lat2d = np.meshgrid(grid.lons, grid.lats)
@@ -457,13 +469,31 @@ class PlateauLuseProvider:
                 continue
             m, rows, cols = nm
             for url in mesh_urls:
-                vmask = self._veg_mask(mesh, url)
+                vmask = self._surface_mask(mesh, url, _PLANTCOVER_TAG, "veg")
                 if vmask is None:
                     continue
                 any_cover = True
                 sub = out[m]
                 paint = vmask[rows, cols] & np.isin(sub, ["urban", "bare", "other"])
                 sub[paint] = "forest"
+                out[m] = sub
+        # PLATEAU roads (tran): asphalt overlay tracing the street network over
+        # built-up/bare land. Kept off water and greenery (forest/field/water) so
+        # a road bridge doesn't erase the river and parks stay green; the network
+        # within the city is what reads on the print.
+        for mesh, mesh_urls in tran_by_mesh2.items():
+            nm = mesh_nodes(mesh)
+            if nm is None:
+                continue
+            m, rows, cols = nm
+            for url in mesh_urls:
+                rmask = self._surface_mask(mesh, url, _ROAD_TAG, "tran")
+                if rmask is None:
+                    continue
+                any_cover = True
+                sub = out[m]
+                paint = rmask[rows, cols] & np.isin(sub, ["urban", "bare", "other"])
+                sub[paint] = "road"
                 out[m] = sub
         return out if any_cover else None
 

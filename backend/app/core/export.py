@@ -24,6 +24,7 @@ DEFAULT_COLORS: dict[str, str] = {
     "forest": "#3f7d3a",
     "field": "#c9d17a",
     "urban": "#b0b0b0",
+    "road": "#6f6f6f",
     "bare": "#cdbb8f",
     "other": "#9a8f80",
     "terrain": "#c2b280",

@@ -54,7 +54,7 @@ export function App() {
 
   const LANDUSE_LEGEND: [string, string][] = [
     ["水域", "#4a80c0"], ["森林", "#3f7d3a"], ["農地", "#c9d17a"],
-    ["建物用地", "#b0b0b0"], ["荒地・海浜", "#cdbb8f"],
+    ["建物用地", "#b0b0b0"], ["道路", "#6f6f6f"], ["荒地・海浜", "#cdbb8f"],
   ];
 
   // Debounced live preview whenever inputs change.
