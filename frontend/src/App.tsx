@@ -10,6 +10,7 @@ export function App() {
   const [sizeMm, setSizeMm] = useState(120);
   const [verticalScale, setVerticalScale] = useState(1);
   const [baseThickness, setBaseThickness] = useState(3);
+  const [gridMax, setGridMax] = useState(1000);
   const [landuse, setLanduse] = useState(false);
   const [landuseSmooth, setLanduseSmooth] = useState(60);
   const [includeTrack, setIncludeTrack] = useState(true);
@@ -36,6 +37,7 @@ export function App() {
       f.append("size_mm", String(sizeMm));
       f.append("vertical_scale", String(verticalScale));
       f.append("base_thickness_mm", String(baseThickness));
+      f.append("grid_max", String(gridMax));
       f.append("landuse", String(landuse));
       f.append("landuse_smooth_m", String(landuseSmooth));
       f.append("include_track", String(includeTrack));
@@ -49,7 +51,7 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, landuse, landuseSmooth, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, terrainColor, trackColor, buildingColor]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, landuseSmooth, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, terrainColor, trackColor, buildingColor]
   );
 
   const LANDUSE_LEGEND: [string, string][] = [
@@ -127,6 +129,17 @@ export function App() {
           <div style={row}>
             <label>底面厚（mm）</label>
             <input type="number" min={0} max={20} step={0.5} value={baseThickness} onChange={(e) => setBaseThickness(Number(e.target.value))} style={{ width: 80 }} />
+          </div>
+          <div style={row}>
+            <label>解像度（詳細度）</label>
+            <select value={gridMax} onChange={(e) => setGridMax(Number(e.target.value))}>
+              <option value={700}>標準（速い・粗い）</option>
+              <option value={1000}>高</option>
+              <option value={1400}>最高（細かい・重い）</option>
+            </select>
+          </div>
+          <div style={{ fontSize: 11, color: "#888", margin: "-0.3rem 0 0.4rem" }}>
+            上げるほど色分け・地形が細かく（建物/橋に近づく）なりますが、生成とプレビューが重くなります。
           </div>
           <div style={row}>
             <label>土地利用で色分け</label>

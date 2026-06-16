@@ -38,7 +38,7 @@ def generate(
     track_color: str = Form("#dc4628"),
     building_color: str = Form("#b0b0b0"),
     dem_zoom: int = Form(15),
-    grid_max: int = Form(400),
+    grid_max: int = Form(1000),
     fmt: str = Form("stl"),
 ) -> Response:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file."""
