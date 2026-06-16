@@ -37,7 +37,7 @@ def generate(
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
     building_color: str = Form("#b0b0b0"),
-    dem_zoom: int = Form(14),
+    dem_zoom: int = Form(15),
     grid_max: int = Form(400),
     fmt: str = Form("stl"),
 ) -> Response:

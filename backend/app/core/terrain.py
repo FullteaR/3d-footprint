@@ -1,11 +1,16 @@
 """Fetch GSI (国土地理院) DEM PNG tiles and build an elevation grid for a bbox.
 
-Tile source : https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png
+Tile source : https://cyberjapandata.gsi.go.jp/xyz/{layer}/{z}/{x}/{y}.png
 Encoding    : x = R*65536 + G*256 + B  (u24)
               x == 2^23           -> invalid (sea / no data)
               x  < 2^23           -> elevation = x * 0.01  [m]
               x  > 2^23           -> elevation = (x - 2^24) * 0.01  [m] (below sea)
 Tiles over the sea may 404; those are treated as no-data.
+
+Resolution: at zoom 15 the 5 m DEM (`dem5a_png`, photogrammetry/LiDAR) is used
+where it exists, falling back per-tile to the 10 m `dem_png` (z14, upsampled) so
+areas outside the 5 m coverage still render. At zoom <= 14 only `dem_png` is used.
+All layers share the same RGB elevation encoding and 標高 T.P. datum.
 """
 from __future__ import annotations
 
@@ -20,10 +25,12 @@ from PIL import Image
 
 from ..config import DATA_DIR
 
-TILE_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png"
+TILE_URL = "https://cyberjapandata.gsi.go.jp/xyz/{layer}/{z}/{x}/{y}.png"
 TILE_SIZE = 256
 INVALID = 1 << 23  # 0x800000
-MAX_TILES = 256  # guard against runaway bbox/zoom
+MAX_TILES = 512  # guard against runaway bbox/zoom (z15 needs ~4x z14's tiles)
+DEM10_LAYER = "dem_png"            # 10 m, served up to z14
+DEM5_LAYERS = ("dem5a_png", "dem5b_png")  # 5 m, z15; tried in order
 
 
 @dataclass
@@ -51,21 +58,54 @@ def _decode_tile(png: bytes) -> np.ndarray:
     return elev
 
 
-def _fetch_tile(z: int, x: int, y: int) -> np.ndarray:
-    """Fetch one tile (with on-disk cache). Returns NaN tile if missing."""
-    cache = DATA_DIR / "dem_png" / str(z) / str(x) / f"{y}.png"
+def _fetch_raw(layer: str, z: int, x: int, y: int) -> np.ndarray | None:
+    """Fetch one source tile (on-disk cache). None if the tile is absent (404).
+
+    A 404 is recorded with an empty ``.absent`` marker so repeated previews
+    don't re-request tiles outside a layer's coverage.
+    """
+    cache = DATA_DIR / layer / str(z) / str(x) / f"{y}.png"
+    absent = cache.with_suffix(".absent")
     if cache.is_file():
         return _decode_tile(cache.read_bytes())
+    if absent.is_file():
+        return None
 
-    url = TILE_URL.format(z=z, x=x, y=y)
+    url = TILE_URL.format(layer=layer, z=z, x=x, y=y)
     resp = requests.get(url, headers={"User-Agent": "3d-footprint/0.1"}, timeout=20)
     if resp.status_code == 404:
-        return np.full((TILE_SIZE, TILE_SIZE), np.nan)
+        absent.parent.mkdir(parents=True, exist_ok=True)
+        absent.touch()
+        return None
     resp.raise_for_status()
 
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_bytes(resp.content)
     return _decode_tile(resp.content)
+
+
+def _fetch_dem_tile(zoom: int, x: int, y: int) -> np.ndarray:
+    """One DEM tile at `zoom`, preferring 5 m at z15 and falling back to 10 m.
+
+    At z15 the 5 m layers are tried first; where none cover the tile, the 10 m
+    z14 tile that contains it is fetched and its matching quadrant upsampled 2x
+    so the mosaic stays a uniform z15 grid. Returns an all-NaN tile if nothing
+    covers it (open sea). At zoom <= 14 the 10 m layer is used directly.
+    """
+    if zoom >= 15:
+        for layer in DEM5_LAYERS:
+            tile = _fetch_raw(layer, 15, x, y)
+            if tile is not None:
+                return tile
+        coarse = _fetch_raw(DEM10_LAYER, zoom - 1, x // 2, y // 2)
+        if coarse is None:
+            return np.full((TILE_SIZE, TILE_SIZE), np.nan)
+        qx, qy = (x % 2) * (TILE_SIZE // 2), (y % 2) * (TILE_SIZE // 2)
+        quad = coarse[qy : qy + TILE_SIZE // 2, qx : qx + TILE_SIZE // 2]
+        return np.repeat(np.repeat(quad, 2, axis=0), 2, axis=1)
+
+    tile = _fetch_raw(DEM10_LAYER, zoom, x, y)
+    return tile if tile is not None else np.full((TILE_SIZE, TILE_SIZE), np.nan)
 
 
 def fetch_elevation_grid(
@@ -92,7 +132,7 @@ def fetch_elevation_grid(
     )
     for ty in range(yt0, yt1 + 1):
         for tx in range(xt0, xt1 + 1):
-            tile = _fetch_tile(zoom, tx, ty)
+            tile = _fetch_dem_tile(zoom, tx, ty)
             ry = (ty - yt0) * TILE_SIZE
             rx = (tx - xt0) * TILE_SIZE
             mosaic[ry : ry + TILE_SIZE, rx : rx + TILE_SIZE] = tile
