@@ -160,6 +160,9 @@ _WATERBODY_TAG = "{http://www.opengis.net/citygml/waterbody/2.0}WaterBody"
 _WTR_CLASS_TAG = "{http://www.opengis.net/citygml/waterbody/2.0}class"
 _WTR_SEA_CLASS = "1030"  # PLATEAU WaterBody class 海(sea); covered already by GSI
 _POSLIST_TAG = "{http://www.opengis.net/gml}posList"
+# veg: only PlantCover (area vegetation) is used as a green overlay; the
+# heavy SolitaryVegetationObject (individual trees) is intentionally skipped.
+_PLANTCOVER_TAG = "{http://www.opengis.net/citygml/vegetation/2.0}PlantCover"
 
 
 def _capture_thin_water(mask: np.ndarray, foot: int) -> np.ndarray:
@@ -215,21 +218,28 @@ def _mesh2_origin(code: str) -> tuple[float, float]:
 
 
 class PlateauLuseProvider:
-    """PLATEAU land-cover provider (土地利用 luse + 水部 wtr). PLATEAU cities only.
+    """PLATEAU land-cover provider (土地利用 luse + 水部 wtr + 植生 veg). PLATEAU only.
 
-    Land use gives the base categories; the dedicated water-body model (wtr) is
-    overlaid on top as authoritative rivers/lakes/sea (more accurate than luse's
-    "水面" parcels).
+    Land use gives the base categories; two dedicated models are overlaid on top:
+    the water-body model (wtr) as authoritative rivers/lakes (more accurate than
+    luse's "水面" parcels), and vegetation (veg, PlantCover area cover only — no
+    individual trees) as green for parks/groves luse missed.
     """
 
     @staticmethod
     def _urls_by_mesh(cities: list[dict], key: str, wanted: set) -> dict[str, list[str]]:
-        """Map covered mesh code -> GML URLs of `files[key]` (one per city)."""
+        """Map covered mesh code -> GML URLs of `files[key]` (one per city).
+
+        `wanted` holds 2nd-level (6-digit) mesh codes. luse/wtr files are keyed by
+        those directly; veg files use 3rd-level (8-digit) codes, matched here by
+        their containing 2nd-level mesh (the 6-digit prefix). The dict stays keyed
+        by each file's own code so multiple 8-digit files coexist.
+        """
         out: dict[str, list[str]] = {}
         for city in cities:
             for entry in city.get("files", {}).get(key, []) or []:
                 mesh = str(entry.get("code"))
-                if mesh in wanted and entry.get("url"):
+                if (mesh in wanted or mesh[:6] in wanted) and entry.get("url"):
                     out.setdefault(mesh, []).append(entry["url"])
         return out
 
@@ -317,6 +327,49 @@ class PlateauLuseProvider:
         img.save(cache)
         return np.array(img) > 0
 
+    def _veg_mask(self, mesh: str, url: str) -> np.ndarray | None:
+        """Binary vegetation raster (PLATEAU_PX^2 bool) for one veg GML, cached.
+
+        Only PlantCover (area vegetation) footprints are filled; the per-tree
+        SolitaryVegetationObject features are skipped (too heavy, and add no
+        meaningful colour at the print's ground resolution). `mesh` is the
+        containing 2nd-level mesh, so polygons land in the right sub-region of
+        the mesh raster even though veg files cover one 3rd-level mesh each.
+        """
+        key = hashlib.sha1(url.encode()).hexdigest()[:16]
+        cache = DATA_DIR / "landuse" / "plateau" / f"veg_{mesh}_{key}.png"
+        if cache.is_file():
+            return np.array(Image.open(cache)) > 0
+
+        lon0, lat0 = _mesh2_origin(mesh)
+        lat_n = lat0 + MESH2_DLAT
+        img = Image.new("L", (PLATEAU_PX, PLATEAU_PX), 0)
+        draw = ImageDraw.Draw(img)
+        try:
+            with requests.get(
+                url, headers={"User-Agent": "3d-footprint/0.1"}, stream=True, timeout=300
+            ) as resp:
+                resp.raise_for_status()
+                resp.raw.decode_content = True
+                from lxml import etree
+
+                for _, el in etree.iterparse(resp.raw, tag=_PLANTCOVER_TAG):
+                    for pos in el.iter(_POSLIST_TAG):
+                        vals = pos.text.split()
+                        lat = np.array(vals[0::3], dtype=float)
+                        lon = np.array(vals[1::3], dtype=float)
+                        col = (lon - lon0) / MESH2_DLON * PLATEAU_PX
+                        row = (lat_n - lat) / MESH2_DLAT * PLATEAU_PX
+                        if len(col) >= 3:
+                            draw.polygon(list(zip(col, row)), fill=1)
+                    el.clear()
+        except (requests.RequestException, OSError, ValueError):
+            return None
+
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        img.save(cache)
+        return np.array(img) > 0
+
     def category_grid(self, grid: ElevationGrid) -> np.ndarray | None:
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
         codes = _mesh2_codes(bbox)
@@ -324,7 +377,13 @@ class PlateauLuseProvider:
         cities = fetch_datacatalog_cities(codes)        # one datacatalog query
         luse_urls = self._urls_by_mesh(cities, "luse", wanted)
         wtr_urls = self._urls_by_mesh(cities, "wtr", wanted)
-        if not luse_urls and not wtr_urls:
+        # veg files are 3rd-level (8-digit); regroup under their 2nd-level mesh so
+        # they overlay through the same per-mesh raster path as luse/wtr.
+        veg_urls = self._urls_by_mesh(cities, "veg", wanted)
+        veg_by_mesh2: dict[str, list[str]] = {}
+        for code8, urls in veg_urls.items():
+            veg_by_mesh2.setdefault(code8[:6], []).extend(urls)
+        if not luse_urls and not wtr_urls and not veg_urls:
             return None
 
         lon2d, lat2d = np.meshgrid(grid.lons, grid.lats)
@@ -388,6 +447,23 @@ class PlateauLuseProvider:
                 # are kept; luse-missed water in built/green areas is dropped.
                 keep_land = np.isin(sub, ["urban", "forest", "field"])
                 sub[wcap[rows, cols] & ~keep_land] = "water"
+                out[m] = sub
+        # PLATEAU vegetation (PlantCover): paint green where land use missed it —
+        # parks, groves and green strips that luse lumped as built-up/bare. Keep
+        # water (never green) and land use's own green (forest/field) untouched.
+        for mesh, mesh_urls in veg_by_mesh2.items():
+            nm = mesh_nodes(mesh)
+            if nm is None:
+                continue
+            m, rows, cols = nm
+            for url in mesh_urls:
+                vmask = self._veg_mask(mesh, url)
+                if vmask is None:
+                    continue
+                any_cover = True
+                sub = out[m]
+                paint = vmask[rows, cols] & np.isin(sub, ["urban", "bare", "other"])
+                sub[paint] = "forest"
                 out[m] = sub
         return out if any_cover else None
 
