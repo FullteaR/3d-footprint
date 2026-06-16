@@ -29,7 +29,7 @@ DEFAULT_COLORS: dict[str, str] = {
     "terrain": "#c2b280",
     "base": "#8a7f6f",
     "track": "#dc4628",
-    "building": "#b0b0b0",  # same as the "urban" land-use colour
+    "building": "#b0b0b0",  # buildings + bridges (same structure colour layer)
 }
 
 _FORMATS = {

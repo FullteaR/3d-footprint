@@ -181,20 +181,20 @@ export function App() {
           <hr style={{ border: 0, borderTop: "1px solid #eee" }} />
 
           <div style={row}>
-            <label>建物 (PLATEAU LOD2)</label>
+            <label>建物・橋 (PLATEAU LOD2)</label>
             <input type="checkbox" checked={includeBuildings} onChange={(e) => setIncludeBuildings(e.target.checked)} />
           </div>
           {includeBuildings && (
             <>
               <div style={{ fontSize: 12, color: "#888", margin: "0 0 0.4rem" }}>
-                PLATEAU整備済みの都市のみ（LOD2/LOD1）。初回は建物データのDLに時間がかかります。
+                PLATEAU整備済みの都市のみ（LOD2/LOD1）。橋・高架も同じ色で含みます（実標高に配置）。初回はDLに時間がかかります。
               </div>
               <div style={row}>
                 <label>建物の高さ強調 ×{buildingScale}</label>
                 <input style={{ flex: 1 }} type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
               </div>
               <div style={row}>
-                <label>建物の色</label>
+                <label>建物・橋の色</label>
                 <input type="color" value={buildingColor} onChange={(e) => setBuildingColor(e.target.value)} />
               </div>
             </>

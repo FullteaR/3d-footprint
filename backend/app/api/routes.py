@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
 from ..core.gpx import expand_bbox, parse_gpx
@@ -65,9 +66,15 @@ def generate(
             proj, cat_grid, naturalize=landuse_smooth_m > 0
         )
         if include_buildings:
+            # Bridges/elevated structures share the buildings toggle and colour
+            # layer; they differ only in placement (kept at their real elevation
+            # above the relief rather than snapped onto the surface).
             building_body = PlateauBuildingProvider().building_body(proj, building_scale)
             if building_body is not None:
                 bodies.append(building_body)
+            bridge_body = PlateauBridgeProvider().bridge_body(proj)
+            if bridge_body is not None:
+                bodies.append(bridge_body)
         if include_track:
             bodies.append(Body(track_ridge(track, proj, track_width_mm, track_height_mm), "track"))
 
