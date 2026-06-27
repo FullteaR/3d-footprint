@@ -3,18 +3,21 @@
 Source: PLATEAU CityGML `bldg` files (one per 3rd-level mesh, 8-digit code),
 resolved from a bbox via the same data-catalog API used for luse.
 
-Each building uses its best available LOD: LOD2 semantic surfaces
-(`bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}` with lod2MultiSurface
-polygons) when present, otherwise its LOD1 `bldg:lod1Solid` (a flat-top prism).
-All faces share a single "building" colour. At real-world scale a typical
-building is a fraction of a millimetre tall, so building_body takes a separate
-height_scale knob to exaggerate it (plus a small floor so none vanish); the
-base is embedded so it fuses to the surface.
+Each building's best available LOD (LOD2 semantic surfaces
+`bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}`, else the LOD1
+`bldg:lod1Solid` prism) is parsed once and cached. For printing, fine roof/wall
+detail is below the FDM nozzle and would collapse, so `building_body` does NOT
+print the raw geometry: it reduces each building to its **footprint** (the union
+of its triangles in plan) extruded to a clean block — its real height x a
+`height_scale` knob (with a floor so short buildings still read) and a minimum
+printable width `min_feature_mm` so thin ones survive instead of vanishing (the
+massing happens in massing.py). All faces share a single "building" colour; the
+block base is embedded so it fuses to the terrain surface.
 
 Polygons (lat/lon/height, EPSG 6697; height is 標高 T.P., same datum as the
 GSI DEM) are triangulated once and cached per mesh as a compact npz in
 geographic coordinates. At request time they are projected into the print's
-millimetre space and snapped onto the terrain surface, so the heavy parse runs
+millimetre space and massed onto the terrain surface, so the heavy parse runs
 only on the first use of an area.
 """
 from __future__ import annotations
@@ -30,11 +33,12 @@ from lxml import etree
 from ..config import DATA_DIR
 from .export import Body
 from .landuse import fetch_datacatalog_cities
+from .massing import footprint_of, printable, prism
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
-EMBED_MM = 0.5            # how far building bases sink into the terrain
-MIN_PROTRUDE_MM = 0.1     # floor so a building never fully vanishes under EMBED
+EMBED_MM = 0.5            # how far building block bases sink into the terrain
+MIN_H_MM = 0.6           # minimum block height so even short buildings read
 
 _BLDG_NS = "http://www.opengis.net/citygml/building/2.0"
 _GML_NS = "http://www.opengis.net/gml"
@@ -218,11 +222,15 @@ class PlateauBuildingProvider:
         np.savez_compressed(cache, verts=verts, faces=faces, ftype=ftype, vbid=vbid)
         return verts, faces, ftype, vbid
 
-    def building_body(self, proj: Projection, height_scale: float = 1.0) -> Body | None:
-        """One Body holding every covered building, snapped onto the terrain.
+    def building_body(
+        self, proj: Projection, height_scale: float = 1.0, min_feature_mm: float = 0.8
+    ) -> Body | None:
+        """One Body of every covered building, massed as footprint blocks.
 
-        `height_scale` exaggerates building height (1.0 = real-world proportion);
-        the base stays anchored to the terrain surface, so only the height grows.
+        Each building is reduced to its footprint (the union of its triangles in
+        plan) extruded to a clean block on the terrain. `height_scale` exaggerates
+        block height (1.0 = real-world proportion); `min_feature_mm` is the minimum
+        printable width, so thin buildings are thickened rather than lost.
         """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
@@ -249,51 +257,50 @@ class PlateauBuildingProvider:
         faces = np.vstack(faces)
         vbid = np.concatenate(vbid)
         lon, lat, h = verts[:, 0], verts[:, 1], verts[:, 2]
+        xy = np.column_stack([proj.x_of(lon), proj.y_of(lat)])  # print mm, for footprints
 
-        # Clip buildings to the print footprint (drop those outside the terrain).
+        # Per-building extents: ground/top elevation and centroid (for terrain snap).
+        nb = int(vbid.max()) + 1
+        ground = np.full(nb, np.inf)
+        np.minimum.at(ground, vbid, h)
+        top = np.full(nb, -np.inf)
+        np.maximum.at(top, vbid, h)
+        counts = np.bincount(vbid, minlength=nb)
+        clon = np.bincount(vbid, lon, minlength=nb) / counts
+        clat = np.bincount(vbid, lat, minlength=nb) / counts
+        surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
+
+        # Keep a building only if all its verts are inside the print footprint.
         inside = (
             (lon >= grid.lons.min()) & (lon <= grid.lons.max())
             & (lat >= grid.lats.min()) & (lat <= grid.lats.max())
         )
-
-        nb = int(vbid.max()) + 1
-        ground = np.full(nb, np.inf)
-        np.minimum.at(ground, vbid, h)
-        counts = np.bincount(vbid, minlength=nb)
-        clon = np.bincount(vbid, lon, minlength=nb) / counts
-        clat = np.bincount(vbid, lat, minlength=nb) / counts
-        keep_b = np.ones(nb, bool)  # keep a building only if all its verts are inside
+        keep_b = np.ones(nb, bool)
         np.logical_and.at(keep_b, vbid, inside)
-        surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
 
-        # Height = real-world (horizontal) scale x a user exaggeration. Unlike
-        # terrain relief, buildings are not driven by the terrain vertical_scale
-        # — they have their own knob. A small per-building floor keeps even very
-        # short buildings from sinking entirely below EMBED and vanishing.
-        bh_mm = np.zeros(nb)
-        np.maximum.at(bh_mm, vbid, (h - ground[vbid]) * proj.scale * height_scale)
-        lift = np.maximum(
-            1.0,
-            np.divide(MIN_PROTRUDE_MM + EMBED_MM, bh_mm,
-                      out=np.ones(nb), where=bh_mm > 1e-6),
-        )
+        # Group faces by building so each footprint is unioned independently.
+        face_bid = vbid[faces[:, 0]]
+        order = np.argsort(face_bid, kind="stable")
+        faces_s = faces[order]
+        bounds = np.searchsorted(face_bid[order], np.arange(nb + 1))
 
-        gx = proj.x_of(lon)
-        gy = proj.y_of(lat)
-        gz = (
-            surface[vbid]
-            + (h - ground[vbid]) * proj.scale * height_scale * lift[vbid]
-            - EMBED_MM
-        )
-        out_v = np.column_stack([gx, gy, gz])
-
-        keep_face = keep_b[vbid[faces[:, 0]]]
-        faces = faces[keep_face]
-        if len(faces) == 0:
+        meshes = []
+        for b in range(nb):
+            if not keep_b[b]:
+                continue
+            fp = printable(footprint_of(xy, faces_s[bounds[b]:bounds[b + 1]]), min_feature_mm)
+            if fp is None:
+                continue
+            # Real height x exaggeration, floored so short blocks still read.
+            height = max(
+                (top[b] - ground[b]) * proj.scale * height_scale, MIN_H_MM, min_feature_mm
+            )
+            zb = float(surface[b]) - EMBED_MM
+            block = prism(fp, zb, zb + height)
+            if block is not None:
+                meshes.append(block)
+        if not meshes:
             return None
 
-        # process=False preserves face order; merge_vertices welds shared edges.
-        # All faces share one "building" colour (roof/wall is not distinguished).
-        mesh = trimesh.Trimesh(vertices=out_v, faces=faces, process=False)
-        mesh.merge_vertices()
+        mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         return Body(mesh, "building")

@@ -47,6 +47,14 @@ class Projection:
     def y_of(self, lat):
         return (lat - self.lat0) * _M_PER_DEG_LAT * self.scale
 
+    def lon_of(self, x):
+        """Inverse of x_of: print mm -> longitude (for sampling terrain at mm xy)."""
+        return self.lon0 + x / (_M_PER_DEG_LON * np.cos(np.radians(self.lat_mid)) * self.scale)
+
+    def lat_of(self, y):
+        """Inverse of y_of: print mm -> latitude."""
+        return self.lat0 + y / (_M_PER_DEG_LAT * self.scale)
+
     def z_of(self, elev):
         return (elev - self.emin) * self.scale * self.vertical_scale
 

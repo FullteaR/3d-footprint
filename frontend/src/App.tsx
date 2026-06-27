@@ -18,6 +18,7 @@ export function App() {
   const [trackHeight, setTrackHeight] = useState(1.5);
   const [includeBuildings, setIncludeBuildings] = useState(false);
   const [buildingScale, setBuildingScale] = useState(1);
+  const [minFeature, setMinFeature] = useState(0.8);
   const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
@@ -45,13 +46,14 @@ export function App() {
       f.append("track_height_mm", String(trackHeight));
       f.append("include_buildings", String(includeBuildings));
       f.append("building_scale", String(buildingScale));
+      f.append("min_feature_mm", String(minFeature));
       f.append("terrain_color", terrainColor);
       f.append("track_color", trackColor);
       f.append("building_color", buildingColor);
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, landuseSmooth, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, terrainColor, trackColor, buildingColor]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, landuseSmooth, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor]
   );
 
   const LANDUSE_LEGEND: [string, string][] = [
@@ -200,11 +202,18 @@ export function App() {
           {includeBuildings && (
             <>
               <div style={{ fontSize: 12, color: "#888", margin: "0 0 0.4rem" }}>
-                PLATEAU整備済みの都市のみ（LOD2/LOD1）。橋・高架も同じ色で含みます（実標高に配置）。初回はDLに時間がかかります。
+                PLATEAU整備済みの都市のみ（LOD2/LOD1）。印刷用に簡略化（建物＝輪郭ブロック化／橋・高架＝デッキ＋脚で地面に接続）。初回はDLに時間がかかります。
               </div>
               <div style={row}>
                 <label>建物の高さ強調 ×{buildingScale}</label>
                 <input style={{ flex: 1 }} type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
+              </div>
+              <div style={row}>
+                <label>最小フィーチャ幅 {minFeature}mm</label>
+                <input style={{ flex: 1 }} type="range" min={0.4} max={2} step={0.1} value={minFeature} onChange={(e) => setMinFeature(Number(e.target.value))} />
+              </div>
+              <div style={{ fontSize: 11, color: "#888", margin: "-0.3rem 0 0.4rem" }}>
+                ノズル径以下は潰れるため、これより細い建物・橋脚は最小幅まで太らせます（目安: ノズル0.4mmなら0.8）。
               </div>
               <div style={row}>
                 <label>建物・橋の色</label>

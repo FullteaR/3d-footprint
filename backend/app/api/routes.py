@@ -32,6 +32,7 @@ def generate(
     include_track: bool = Form(True),
     include_buildings: bool = Form(False),
     building_scale: float = Form(1.0),
+    min_feature_mm: float = Form(0.8),
     landuse: bool = Form(False),
     landuse_smooth_m: float = Form(60.0),
     terrain_color: str = Form("#c2b280"),
@@ -67,16 +68,23 @@ def generate(
         )
         if include_buildings:
             # Bridges/elevated structures share the buildings toggle and colour
-            # layer; they differ only in placement (kept at their real elevation
-            # above the relief rather than snapped onto the surface).
-            building_body = PlateauBuildingProvider().building_body(proj, building_scale)
+            # layer; both are massed into printable blocks (min_feature_mm sets
+            # the minimum printable width), differing only in placement: buildings
+            # sit on the surface, bridges keep their real deck elevation + pillars.
+            building_body = PlateauBuildingProvider().building_body(
+                proj, building_scale, min_feature_mm
+            )
             if building_body is not None:
                 bodies.append(building_body)
-            bridge_body = PlateauBridgeProvider().bridge_body(proj)
+            bridge_body = PlateauBridgeProvider().bridge_body(proj, min_feature_mm)
             if bridge_body is not None:
                 bodies.append(bridge_body)
         if include_track:
-            bodies.append(Body(track_ridge(track, proj, track_width_mm, track_height_mm), "track"))
+            # Keep the ridge at least one nozzle wide so it does not split.
+            bodies.append(Body(
+                track_ridge(track, proj, max(track_width_mm, min_feature_mm), track_height_mm),
+                "track",
+            ))
 
         # "terrain" label (land-use off) maps to the user's terrain color.
         colors = {

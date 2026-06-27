@@ -8,9 +8,17 @@ so the files partition rather than duplicate); we load *all* of them per mesh.
 Unlike buildings — which sit *on* the terrain and get their own vertical
 exaggeration — a bridge spans a river/valley at a fixed elevation, so it must
 track the terrain's vertical transform: its CityGML heights (標高 T.P., same
-datum as the GSI DEM) are projected straight through `Projection.z_of`, placing
-the deck at its true height above the (exaggerated) relief. The deck thus rises
-and falls with `vertical_scale` exactly as the surrounding terrain does.
+datum as the GSI DEM) are projected through `Projection.z_of`, placing the deck
+at its true height above the (exaggerated) relief, rising and falling with
+`vertical_scale` exactly as the surrounding terrain does.
+
+For printing, the raw deck/girder geometry is far below the FDM nozzle and a
+deck floating in mid-air cannot be printed at all. So a bridge is NOT printed
+as-is: each connected span is reduced to its footprint and rebuilt as a
+printable solid — a thick deck slab at the real deck elevation, plus stout
+pillars dropped from the deck down to the terrain surface so nothing floats and
+"a bridge is here" still reads (see massing.py). Short spans become a single
+solid block to the ground. `min_feature_mm` sets the minimum printable width.
 
 Geometry parsing/triangulation is shared with the building pipeline; only the
 feature namespace and the placement differ. Triangulated polygons are cached per
@@ -22,14 +30,21 @@ import hashlib
 
 import numpy as np
 import requests
+import shapely
 import trimesh
 from lxml import etree
+from shapely.geometry import box
 
 from ..config import DATA_DIR
 from .buildings import _mesh3_codes, _rings, _triangulate
 from .export import Body
 from .landuse import fetch_datacatalog_cities
+from .massing import footprint_of, printable, prism
 from .mesh import Projection
+
+EMBED_MM = 0.5            # how far a pillar/block base sinks into the terrain
+DECK_THICKNESS_MM = 1.2  # printable deck-slab thickness (raised to min_feature)
+PILLAR_SPACING_MM = 8.0  # target gap between support pillars along a long span
 
 _BRID_NS = "http://www.opengis.net/citygml/bridge/2.0"
 _GML_NS = "http://www.opengis.net/gml"
@@ -132,12 +147,13 @@ class PlateauBridgeProvider:
         np.savez_compressed(cache, verts=verts, faces=faces)
         return verts, faces
 
-    def bridge_body(self, proj: Projection) -> Body | None:
-        """One Body holding every covered bridge, placed at its true elevation.
+    def bridge_body(self, proj: Projection, min_feature_mm: float = 0.8) -> Body | None:
+        """One Body of every covered bridge, massed as deck slabs + ground pillars.
 
-        Bridges are projected through the terrain's full vertical transform
-        (`z_of`), so the deck sits above the river/valley by the same amount the
-        relief is exaggerated — no separate height knob and no terrain snapping.
+        Each connected span is reduced to a footprint, capped with a thick deck
+        slab at the real deck elevation (so it tracks `vertical_scale`), and tied
+        to the ground with stout pillars so nothing floats. `min_feature_mm` sets
+        the minimum printable width.
         """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
@@ -162,11 +178,8 @@ class PlateauBridgeProvider:
         verts = np.vstack(verts)
         faces = np.vstack(faces)
         lon, lat, h = verts[:, 0], verts[:, 1], verts[:, 2]
-
-        gx = proj.x_of(lon)
-        gy = proj.y_of(lat)
-        gz = proj.z_of(h)
-        out_v = np.column_stack([gx, gy, gz])
+        xy = np.column_stack([proj.x_of(lon), proj.y_of(lat)])  # print mm
+        z_real = proj.z_of(h)  # deck elevation in mm (tracks vertical_scale)
 
         # Clip to the print footprint by face centroid, so a bridge crossing the
         # boundary keeps its inside portion instead of vanishing whole.
@@ -180,8 +193,101 @@ class PlateauBridgeProvider:
         if len(faces) == 0:
             return None
 
-        mesh = trimesh.Trimesh(vertices=out_v, faces=faces, process=False)
-        mesh.merge_vertices()
-        # Bridges share the "building" colour layer (one structure category in
-        # the UI); only their vertical placement differs (real elevation above).
+        # One footprint polygon per connected span; mass each into deck + pillars.
+        fp_all = footprint_of(xy, faces)
+        if fp_all is None:
+            return None
+        pieces: list[trimesh.Trimesh] = []
+        for span in getattr(fp_all, "geoms", [fp_all]):
+            sp = printable(span, min_feature_mm)
+            if sp is None:
+                continue
+            for poly in getattr(sp, "geoms", [sp]):
+                pieces.extend(_span_pieces(poly, xy, z_real, proj, min_feature_mm))
+        if not pieces:
+            return None
+
+        # Keep the deck slab and pillars as separate watertight shells (they
+        # overlap; a slicer unions them). Welding them here would create
+        # non-manifold edges where a pillar meets the deck, so no merge.
+        mesh = pieces[0] if len(pieces) == 1 else trimesh.util.concatenate(pieces)
+        # Bridges share the "building" colour layer (one structure category in UI).
         return Body(mesh, "building")
+
+
+def _span_pieces(fp, xy, z_real, proj, min_feature) -> list[trimesh.Trimesh]:
+    """Mass one span footprint into a deck slab plus supports reaching the terrain.
+
+    The deck top is a high percentile of the bridge's real elevations under the
+    span (robust to stray-high verts like railings/cables); the slab is thick
+    enough to print. Short spans get a single solid block to the ground; long
+    spans get periodic pillars plus guaranteed abutments at the two far ends, so
+    the deck is always tied down and nothing floats.
+    """
+    deck_th = max(DECK_THICKNESS_MM, min_feature)
+    probe = fp.buffer(min_feature)                       # verts may sit on the rim
+    pm = shapely.contains_xy(probe, xy[:, 0], xy[:, 1])
+    if not pm.any():
+        return []
+    deck_top = float(np.percentile(z_real[pm], 90.0))
+    deck_bot = deck_top - deck_th
+
+    pieces: list[trimesh.Trimesh] = []
+    deck = prism(fp, deck_bot, deck_top)
+    if deck is not None:
+        pieces.append(deck)
+
+    ext = np.asarray(fp.exterior.coords)[:-1, :2]
+    if len(ext) < 2:
+        return pieces
+    step = max(1, len(ext) // 24)                        # terrain probe around outline
+    probe_xy = ext[::step]
+    terr = proj.sample_z(proj.lon_of(probe_xy[:, 0]), proj.lat_of(probe_xy[:, 1]))
+
+    minx, miny, maxx, maxy = fp.bounds
+    span_len = float(np.hypot(maxx - minx, maxy - miny))
+    if span_len < 2.0 * PILLAR_SPACING_MM:
+        # Short span: one solid block from the lowest ground up to the deck.
+        block = prism(fp, float(np.min(terr)) - EMBED_MM, deck_top)
+        if block is not None:
+            pieces.append(block)
+        return pieces
+
+    # Long span: periodic pillars + abutments at the two far ends.
+    s = max(0.75, 0.75 * min_feature)                    # pillar half-width
+    inner = fp.buffer(-0.5 * min_feature)
+    if inner.is_empty:
+        inner = fp
+    centers = _pillar_centers(fp, inner) + _span_ends(ext)
+    for cx, cy in centers:
+        terrain_z = float(proj.sample_z(proj.lon_of(cx), proj.lat_of(cy)))
+        if terrain_z >= deck_bot - 0.1:                  # deck already meets the ground
+            continue
+        cell = box(cx - s, cy - s, cx + s, cy + s).intersection(fp)
+        if cell.is_empty or cell.area < (0.4 * min_feature) ** 2:
+            continue
+        leg = prism(cell, terrain_z - EMBED_MM, deck_bot)
+        if leg is not None:
+            pieces.append(leg)
+    return pieces
+
+
+def _pillar_centers(fp, inner) -> list[tuple[float, float]]:
+    """Grid points inside `inner` at ~PILLAR_SPACING apart (support placements)."""
+    minx, miny, maxx, maxy = fp.bounds
+    xs = np.arange(minx + PILLAR_SPACING_MM / 2, maxx, PILLAR_SPACING_MM)
+    ys = np.arange(miny + PILLAR_SPACING_MM / 2, maxy, PILLAR_SPACING_MM)
+    if xs.size == 0 or ys.size == 0:
+        return []
+    gx, gy = np.meshgrid(xs, ys)
+    pts = np.column_stack([gx.ravel(), gy.ravel()])
+    m = shapely.contains_xy(inner, pts[:, 0], pts[:, 1])
+    return [(float(x), float(y)) for x, y in pts[m]]
+
+
+def _span_ends(ext: np.ndarray) -> list[tuple[float, float]]:
+    """The two farthest-apart outline points (the span's abutments)."""
+    c = ext - ext.mean(axis=0)
+    _, _, vt = np.linalg.svd(c, full_matrices=False)
+    t = c @ vt[0]                                        # project onto principal axis
+    return [tuple(ext[int(t.argmin())]), tuple(ext[int(t.argmax())])]

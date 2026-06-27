@@ -13,3 +13,7 @@ lxml==5.3.0
 
 # M6: PLATEAU LOD2 building polygon triangulation
 mapbox-earcut==1.0.3
+
+# Printability massing: 2D footprint algebra (union/buffer/simplify) for the
+# building/bridge デフォルメ
+shapely==2.0.6
