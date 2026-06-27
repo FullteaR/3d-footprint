@@ -85,24 +85,41 @@ def _fetch_raw(layer: str, z: int, x: int, y: int) -> np.ndarray | None:
 
 
 def _fetch_dem_tile(zoom: int, x: int, y: int) -> np.ndarray:
-    """One DEM tile at `zoom`, preferring 5 m at z15 and falling back to 10 m.
+    """One DEM tile at `zoom`, preferring 5 m at z15 and *filling gaps* from 10 m.
 
-    At z15 the 5 m layers are tried first; where none cover the tile, the 10 m
-    z14 tile that contains it is fetched and its matching quadrant upsampled 2x
-    so the mosaic stays a uniform z15 grid. Returns an all-NaN tile if nothing
-    covers it (open sea). At zoom <= 14 the 10 m layer is used directly.
+    At z15 the 5 m layers are tried first. A 5 m tile can be **present but partly
+    no-data** — the survey leaves holes over water edges and low reclaimed land —
+    so its NaN pixels are filled from the 10 m z14 tile that contains it (matching
+    quadrant upsampled 2x), not only when the whole 5 m tile is absent (404).
+    Without this, low reclaimed land the 10 m DEM *does* cover (e.g. Tokyo Bay's
+    surveyed islands, ~0–7 m) shows up as no-data and floods as sea. The 10 m
+    fetch is skipped when the 5 m tile is already gap-free (the common inland
+    case). Returns an all-NaN tile only where neither layer covers it (open sea).
+    At zoom <= 14 the 10 m layer is used directly.
     """
     if zoom >= 15:
+        fine = None
         for layer in DEM5_LAYERS:
-            tile = _fetch_raw(layer, 15, x, y)
-            if tile is not None:
-                return tile
+            t = _fetch_raw(layer, 15, x, y)
+            if t is not None:
+                fine = t
+                break
+        if fine is not None and np.isfinite(fine).all():
+            return fine                       # fully covered by 5 m; no fallback
         coarse = _fetch_raw(DEM10_LAYER, zoom - 1, x // 2, y // 2)
-        if coarse is None:
-            return np.full((TILE_SIZE, TILE_SIZE), np.nan)
-        qx, qy = (x % 2) * (TILE_SIZE // 2), (y % 2) * (TILE_SIZE // 2)
-        quad = coarse[qy : qy + TILE_SIZE // 2, qx : qx + TILE_SIZE // 2]
-        return np.repeat(np.repeat(quad, 2, axis=0), 2, axis=1)
+        coarse_up = None
+        if coarse is not None:
+            qx, qy = (x % 2) * (TILE_SIZE // 2), (y % 2) * (TILE_SIZE // 2)
+            quad = coarse[qy : qy + TILE_SIZE // 2, qx : qx + TILE_SIZE // 2]
+            coarse_up = np.repeat(np.repeat(quad, 2, axis=0), 2, axis=1)
+        if fine is None:                      # no 5 m: use 10 m, else open sea
+            return coarse_up if coarse_up is not None else np.full(
+                (TILE_SIZE, TILE_SIZE), np.nan)
+        if coarse_up is not None:             # 5 m with holes: patch from 10 m
+            fine = fine.copy()
+            holes = ~np.isfinite(fine)
+            fine[holes] = coarse_up[holes]
+        return fine
 
     tile = _fetch_raw(DEM10_LAYER, zoom, x, y)
     return tile if tile is not None else np.full((TILE_SIZE, TILE_SIZE), np.nan)

@@ -27,7 +27,13 @@ from typing import Protocol
 import numpy as np
 import requests
 from PIL import Image, ImageDraw
-from scipy.ndimage import binary_opening, gaussian_filter, label, maximum_filter
+from scipy.ndimage import (
+    binary_opening,
+    distance_transform_edt,
+    gaussian_filter,
+    label,
+    maximum_filter,
+)
 
 from ..config import DATA_DIR
 from .terrain import ElevationGrid
@@ -531,10 +537,14 @@ def _smooth_categories(cat: np.ndarray, sigma_cells: float) -> np.ndarray:
     return cats[np.argmax(stack, axis=0)]
 
 
-# Above this elevation (m, T.P.), water that the smoothing *introduced* over
-# land (a flooded island/hill) is reverted; water the source classified as such
-# (a hilltop pond, a river) is kept. Coastal water at/under it is left alone.
-WATER_GUARD_M = 1.5
+# Above this elevation (m, T.P.) a water-coloured cell that has *valid* DEM data
+# is treated as land: GSI DEM returns no-data over open water, so real surveyed
+# elevation above the waterline can't be sea. Catches both smoothing-flooded
+# islands and stale 海水域 land use over since-reclaimed land (Tokyo Bay fill).
+# Genuine open water is no-data (not finite) and so is never touched. Set just
+# above the T.P. datum (~mean sea level) to pick up low reclaimed fill while
+# leaving sub-datum cells (tidal flats, dredged channels, DEM noise) as water.
+WATER_GUARD_M = 0.5
 
 
 def resolve_category_grid(
@@ -590,12 +600,29 @@ def resolve_category_grid(
         border = np.unique(np.concatenate([lbl[0], lbl[-1], lbl[:, 0], lbl[:, -1]]))
         sea = np.isin(lbl, border[border > 0])
         cat[sea] = "water"
-    # Don't let smoothing flood clearly-elevated *land* (a small island or hill)
-    # blue: where a cell is water well above sea level yet was land before
-    # smoothing, revert it to that land class. Genuine elevated water bodies (a
-    # hilltop pond, a river) were water before smoothing too (pre == "water"),
-    # so they are left untouched and stay blue.
+    # A water-coloured cell with valid DEM elevation above the waterline is land
+    # (the DEM is no-data over real water). Recolour it:
+    #   - smoothing flooded an island/hill -> its pre-smoothing land class;
+    #   - stale 海水域 over since-reclaimed land, where even the pre-smoothing
+    #     class is water (Tokyo Bay's newer fill: 新海面処分場/中央防波堤 etc. that
+    #     no land-use source maps as land yet) -> the nearest land class, since
+    #     real elevation there can't be open sea. The surveyed relief is kept; only
+    #     the colour changes, so the reclaimed ground stops reading as flat water.
     bad = (cat == "water") & np.isfinite(elev) & (elev > WATER_GUARD_M)
+    # Protect thin/linear water (rivers, canals): a flat water surface can also
+    # carry a valid DEM value, so a narrow waterway would be wrongly recolored to
+    # land. Restrict the recolor to *wide* water bodies (reclaimed land / former
+    # sea) by keeping only cells that survive a one-cell opening of the water
+    # mask; narrow channels erode away and stay water.
+    bad &= binary_opening(cat == "water", iterations=1)
     if bad.any():
-        cat[bad] = pre[bad]
+        repl = pre.copy()
+        stale = bad & (pre == "water")
+        if stale.any():
+            nonwater = (cat != "water") & np.isfinite(elev)
+            if nonwater.any():
+                _, (ri, ci) = distance_transform_edt(~nonwater, return_indices=True)
+                repl = np.where(stale, cat[ri, ci], repl)
+            repl = np.where(stale & (repl == "water"), "bare", repl)
+        cat = np.where(bad, repl, cat)
     return cat, used_plateau
