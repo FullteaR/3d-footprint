@@ -8,7 +8,7 @@ from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
 from ..core.gpx import expand_bbox, parse_gpx
-from ..core.landuse import resolve_category_grid
+from ..core.coloring import plateau_category_grid
 from ..core.mesh import MeshParams, make_projection, terrain_solid
 from ..core.terrain import fetch_elevation_grid
 from ..core.track import track_ridge
@@ -34,7 +34,6 @@ def generate(
     building_scale: float = Form(1.0),
     min_feature_mm: float = Form(0.8),
     landuse: bool = Form(False),
-    landuse_smooth_m: float = Form(60.0),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
     building_color: str = Form("#b0b0b0"),
@@ -58,14 +57,10 @@ def generate(
 
         cat_grid = None
         if landuse:
-            # PLATEAU vs KSJ regime (affects only how much the categories are
-            # smoothed) is decided inside the resolver; border straightening in
-            # terrain_solid then keeps straight edges straight regardless.
-            cat_grid, _ = resolve_category_grid(grid, landuse_smooth_m)
-        # smoothness 0 => no naturalisation at all (raw grid-cell squares).
-        bodies: list[Body] = terrain_solid(
-            proj, cat_grid, naturalize=landuse_smooth_m > 0
-        )
+            # PLATEAU luse painted as-is; cells it doesn't classify stay
+            # "terrain" (the plain terrain colour). No fallback source yet.
+            cat_grid = plateau_category_grid(grid)
+        bodies: list[Body] = terrain_solid(proj, cat_grid, naturalize=False)
         if include_buildings:
             # Bridges/elevated structures share the buildings toggle and colour
             # layer; both are massed into printable blocks (min_feature_mm sets

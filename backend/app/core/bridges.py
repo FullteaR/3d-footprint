@@ -38,7 +38,7 @@ from shapely.geometry import box
 from ..config import DATA_DIR
 from .buildings import _mesh3_codes, _rings, _triangulate
 from .export import Body
-from .landuse import fetch_datacatalog_cities
+from .plateau import fetch_datacatalog_cities
 from .massing import footprint_of, printable, prism
 from .mesh import Projection
 

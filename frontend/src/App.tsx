@@ -12,7 +12,6 @@ export function App() {
   const [baseThickness, setBaseThickness] = useState(3);
   const [gridMax, setGridMax] = useState(1000);
   const [landuse, setLanduse] = useState(false);
-  const [landuseSmooth, setLanduseSmooth] = useState(60);
   const [includeTrack, setIncludeTrack] = useState(true);
   const [trackWidth, setTrackWidth] = useState(1.2);
   const [trackHeight, setTrackHeight] = useState(1.5);
@@ -40,7 +39,6 @@ export function App() {
       f.append("base_thickness_mm", String(baseThickness));
       f.append("grid_max", String(gridMax));
       f.append("landuse", String(landuse));
-      f.append("landuse_smooth_m", String(landuseSmooth));
       f.append("include_track", String(includeTrack));
       f.append("track_width_mm", String(trackWidth));
       f.append("track_height_mm", String(trackHeight));
@@ -53,12 +51,13 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, landuseSmooth, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor]
   );
 
+  // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
   const LANDUSE_LEGEND: [string, string][] = [
-    ["水域", "#4a80c0"], ["森林", "#3f7d3a"], ["農地", "#c9d17a"],
-    ["建物用地", "#b0b0b0"], ["道路", "#6f6f6f"], ["荒地・海浜", "#cdbb8f"],
+    ["水面", "#4a80c0"], ["森林・緑地", "#3f7d3a"], ["農地", "#c9d17a"],
+    ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
   ];
 
   // Debounced live preview whenever inputs change.
@@ -147,32 +146,25 @@ export function App() {
             <label>土地利用で色分け</label>
             <input type="checkbox" checked={landuse} onChange={(e) => setLanduse(e.target.checked)} />
           </div>
-          {landuse ? (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 12, color: "#555", margin: "0 0 0.4rem" }}>
-              {LANDUSE_LEGEND.map(([name, c]) => (
-                <span key={name} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ width: 11, height: 11, background: c, borderRadius: 2, display: "inline-block" }} />
-                  {name}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <div style={row}>
-              <label>地形の色</label>
-              <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />
-            </div>
-          )}
           {landuse && (
             <>
-              <div style={row}>
-                <label>色分けのなめらかさ {landuseSmooth}m</label>
-                <input style={{ flex: 1 }} type="range" min={0} max={200} step={10} value={landuseSmooth} onChange={(e) => setLanduseSmooth(Number(e.target.value))} />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 12, color: "#555", margin: "0 0 0.4rem" }}>
+                {LANDUSE_LEGEND.map(([name, c]) => (
+                  <span key={name} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ width: 11, height: 11, background: c, borderRadius: 2, display: "inline-block" }} />
+                    {name}
+                  </span>
+                ))}
               </div>
-              <div style={{ fontSize: 11, color: "#888", margin: "-0.3rem 0 0.4rem" }}>
-                0で補完オフ（生のマス目）。上げるほど境界を曲線化＋色を統合（PLATEAU域は自動で控えめ）。
+              <div style={{ fontSize: 11, color: "#888", margin: "0 0 0.4rem" }}>
+                PLATEAU（土地利用）の整備地域のみ。整備外や分類のない部分は「地形の色」になります。
               </div>
             </>
           )}
+          <div style={row}>
+            <label>地形の色</label>
+            <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />
+          </div>
 
           <hr style={{ border: 0, borderTop: "1px solid #eee" }} />
 

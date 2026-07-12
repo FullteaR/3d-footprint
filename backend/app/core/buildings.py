@@ -32,7 +32,7 @@ from lxml import etree
 
 from ..config import DATA_DIR
 from .export import Body
-from .landuse import fetch_datacatalog_cities
+from .plateau import fetch_datacatalog_cities
 from .massing import footprint_of, printable, prism
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
