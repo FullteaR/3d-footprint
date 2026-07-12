@@ -8,7 +8,7 @@ from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
 from ..core.gpx import expand_bbox, parse_gpx
-from ..core.coloring import plateau_category_grid
+from ..core.coloring import category_grid
 from ..core.mesh import MeshParams, make_projection, terrain_solid
 from ..core.terrain import fetch_elevation_grid
 from ..core.track import track_ridge
@@ -57,9 +57,9 @@ def generate(
 
         cat_grid = None
         if landuse:
-            # PLATEAU luse painted as-is; cells it doesn't classify stay
-            # "terrain" (the plain terrain colour). No fallback source yet.
-            cat_grid = plateau_category_grid(grid)
+            # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells
+            # PLATEAU doesn't classify; the rest stays the terrain colour.
+            cat_grid = category_grid(grid)
         bodies: list[Body] = terrain_solid(proj, cat_grid, naturalize=False)
         if include_buildings:
             # Bridges/elevated structures share the buildings toggle and colour

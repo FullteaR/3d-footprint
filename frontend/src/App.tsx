@@ -157,7 +157,7 @@ export function App() {
                 ))}
               </div>
               <div style={{ fontSize: 11, color: "#888", margin: "0 0 0.4rem" }}>
-                PLATEAU（土地利用）の整備地域のみ。整備外や分類のない部分は「地形の色」になります。
+                PLATEAU（土地利用）を優先し、無い部分はJAXA土地被覆図（10m）で補完。どちらにも無い部分は「地形の色」になります（道路はPLATEAU域のみ）。
               </div>
             </>
           )}

@@ -7,11 +7,11 @@ compact npz of polygon rings + class code, then rasterized straight onto the
 DEM grid in document order. The official class codes
 (codelists/Common_landUseType.xml) map to a small print palette.
 
-Parcels of unknown class (231 不明) and cells no parcel covers keep the
-"terrain" label, i.e. the plain user-picked terrain colour — so partial
-coverage colours exactly what PLATEAU knows and nothing more, and areas
-without PLATEAU luse are simply left uncolored. A nationwide fallback source
-can slot in behind `plateau_category_grid()` later.
+Parcels of unknown class (231 不明) and cells no parcel covers fall through
+to the JAXA HRLULC fallback (jaxa.py) — strictly gap-fill, painted just as
+literally: it never overrides a PLATEAU-classified cell. Cells neither source
+classifies keep the "terrain" label, i.e. the plain user-picked terrain
+colour. No smoothing, no sea stamping, no DEM-based corrections anywhere.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from lxml import etree
 from PIL import Image, ImageDraw
 
 from ..config import DATA_DIR
+from . import jaxa
 from .plateau import fetch_datacatalog_cities
 from .terrain import ElevationGrid
 
@@ -218,38 +219,57 @@ def _paint(grid: ElevationGrid, files: list[tuple[str, str]]) -> tuple[np.ndarra
     return np.asarray(img), all_loaded
 
 
-def plateau_category_grid(grid: ElevationGrid) -> np.ndarray | None:
-    """(ny, nx) print-category labels for the DEM grid — PLATEAU luse, as-is.
+def _plateau_index_grid(grid: ElevationGrid) -> np.ndarray | None:
+    """(ny, nx) palette-index grid from PLATEAU luse (0 = unclassified).
 
-    None when no PLATEAU luse file covers the bbox (or none could be fetched):
-    the caller then renders the plain single-colour terrain. The painted grid
-    is memoized per (bbox, shape, file set), so the preview loop repaints only
-    when the area or resolution actually changes.
+    None when no luse file covers the bbox at all. The painted grid is
+    memoized per (bbox, shape, file set), so the preview loop repaints only
+    when the area or resolution actually changes; a partial paint (some file
+    failed to download) is returned but not memoized, so a later request can
+    heal the gap.
     """
-    nx, ny = grid.lons.size, grid.lats.size
-    if nx < 2 or ny < 2:
-        return None
     bbox = (float(grid.lons[0]), float(grid.lats[0]),
             float(grid.lons[-1]), float(grid.lats[-1]))
     files = _luse_files(bbox)
     if not files:
         return None
 
+    ny, nx = grid.lats.size, grid.lons.size
     key = hashlib.sha1("|".join(
         [",".join(f"{v:.9f}" for v in bbox), f"{ny}x{nx}", _MAP_SALT]
         + sorted(url for _, url in files)
     ).encode()).hexdigest()[:16]
     memo = DATA_DIR / "plateau_luse" / f"grid_{key}.npz"
     if memo.is_file():
-        idx_grid = np.load(memo)["classes"]
-    else:
-        idx_grid, all_loaded = _paint(grid, files)
-        if not all_loaded:
-            # Some file failed to download: return the partial paint but don't
-            # memoize it, so the next request can heal the gap.
-            if not idx_grid.any():
-                return None
-            return np.asarray(_PALETTE, dtype="<U8")[idx_grid]
-        memo.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(memo, classes=idx_grid)
-    return np.asarray(_PALETTE, dtype="<U8")[idx_grid]
+        return np.load(memo)["classes"]
+    idx, all_loaded = _paint(grid, files)
+    if not all_loaded:
+        return idx if idx.any() else None
+    memo.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(memo, classes=idx)
+    return idx
+
+
+def category_grid(grid: ElevationGrid) -> np.ndarray | None:
+    """(ny, nx) print-category labels for the DEM grid.
+
+    PLATEAU luse wherever it classifies a cell; JAXA HRLULC fills *only* the
+    cells PLATEAU leaves unclassified (it never overrides PLATEAU). Cells
+    neither source classifies keep the "terrain" label; None when neither
+    source covers the bbox at all (plain single-colour terrain).
+    """
+    nx, ny = grid.lons.size, grid.lats.size
+    if nx < 2 or ny < 2:
+        return None
+    idx = _plateau_index_grid(grid)
+    if idx is None or (idx == 0).any():
+        classes = jaxa.class_grid(grid)
+        if classes is not None:
+            lut = np.zeros(256, np.uint8)
+            for cls, cat in jaxa.CLASS_CATEGORY.items():
+                lut[cls] = _IDX[cat]
+            fill = lut[classes]
+            idx = fill if idx is None else np.where(idx == 0, fill, idx)
+    if idx is None:
+        return None
+    return np.asarray(_PALETTE, dtype="<U8")[idx]
