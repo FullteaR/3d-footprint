@@ -2,8 +2,10 @@
 
 Source: PLATEAU CityGML `brid` files (one per 3rd-level mesh, 8-digit code),
 resolved from a bbox via the same data-catalog API used for buildings. A mesh
-can appear under several municipalities (a bridge belongs to exactly one city,
-so the files partition rather than duplicate); we load *all* of them per mesh.
+can appear under several municipalities — sometimes partitioned (each city
+carries only its own bridges), sometimes the identical mesh-wide file
+duplicated into every city's dataset (2025 pref sets). We load *all* of them
+per mesh and render each distinct content once.
 
 Unlike buildings — which sit *on* the terrain and get their own vertical
 exaggeration — a bridge spans a river/valley at a fixed elevation, so it must
@@ -97,10 +99,12 @@ class PlateauBridgeProvider:
         out: dict[str, list[str]] = {}
         for city in fetch_datacatalog_cities(codes):
             for entry in city.get("files", {}).get("brid", []) or []:
-                mesh = str(entry.get("code"))
-                if mesh in wanted and entry.get("url"):
-                    out.setdefault(mesh, []).append(entry["url"])
-        return out
+                mesh, url = str(entry.get("code")), entry.get("url")
+                # Dedupe: a city spanning several query chunks is returned once
+                # per chunk, which would parse and render its bridges twice.
+                if mesh in wanted and url and url not in out.setdefault(mesh, []):
+                    out[mesh].append(url)
+        return {m: u for m, u in out.items() if u}
 
     def _geometry(self, mesh: str, url: str):
         """Cached geographic geometry for one brid GML.
@@ -163,12 +167,19 @@ class PlateauBridgeProvider:
 
         verts, faces = [], []
         voff = 0
+        seen: set[bytes] = set()
         for mesh, mesh_urls in urls.items():
             for url in mesh_urls:
                 geo = self._geometry(mesh, url)
                 if geo is None or len(geo[0]) == 0:
                     continue
                 v, f = geo
+                # Same-mesh files from different cities may be byte-identical
+                # duplicates (2025 pref sets): render each content once.
+                digest = hashlib.sha1(v.tobytes() + f.tobytes()).digest()
+                if digest in seen:
+                    continue
+                seen.add(digest)
                 verts.append(v)
                 faces.append(f + voff)
                 voff += len(v)

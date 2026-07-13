@@ -1,7 +1,10 @@
 """PLATEAU LOD2/LOD1 buildings -> printable solids sitting on the terrain.
 
-Source: PLATEAU CityGML `bldg` files (one per 3rd-level mesh, 8-digit code),
-resolved from a bbox via the same data-catalog API used for luse.
+Source: PLATEAU CityGML `bldg` files (one per 3rd-level mesh, 8-digit code,
+*per municipality* — a border mesh has one file per city, holding either just
+that city's buildings or the whole mesh duplicated, dataset-dependent),
+resolved from a bbox via the data-catalog API. All files are loaded and
+identical content is rendered once.
 
 Each building's best available LOD (LOD2 semantic surfaces
 `bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}`, else the LOD1
@@ -158,15 +161,21 @@ def _rings(poly: etree._Element) -> tuple[np.ndarray, list[np.ndarray]]:
 class PlateauBuildingProvider:
     """PLATEAU LOD2/LOD1 building provider. Covers PLATEAU cities only."""
 
-    def _bldg_urls(self, codes: list[str]) -> dict[str, str]:
+    def _bldg_urls(self, codes: list[str]) -> dict[str, list[str]]:
+        """Map covered 8-digit mesh -> every bldg GML URL (one per municipality).
+
+        A mesh straddling a city border appears in each city's dataset and each
+        file holds only that city's buildings, so all of them are needed —
+        keeping just the first would drop the other side of the border.
+        """
         wanted = set(codes)
-        out: dict[str, str] = {}
+        out: dict[str, list[str]] = {}
         for city in fetch_datacatalog_cities(codes):
             for entry in city.get("files", {}).get("bldg", []) or []:
-                mesh = str(entry.get("code"))
-                if mesh in wanted and entry.get("url") and mesh not in out:
-                    out[mesh] = entry["url"]
-        return out
+                mesh, url = str(entry.get("code")), entry.get("url")
+                if mesh in wanted and url and url not in out.setdefault(mesh, []):
+                    out[mesh].append(url)
+        return {m: u for m, u in out.items() if u}
 
     def _geometry(self, mesh: str, url: str):
         """Cached geographic geometry for one bldg GML.
@@ -240,16 +249,26 @@ class PlateauBuildingProvider:
 
         verts, faces, vbid = [], [], []
         voff = boff = 0
-        for mesh, url in urls.items():
-            geo = self._geometry(mesh, url)
-            if geo is None or len(geo[0]) == 0:
-                continue
-            v, f, _t, b = geo  # roof/wall type unused: buildings are one colour
-            verts.append(v)
-            faces.append(f + voff)
-            vbid.append(b + boff)
-            voff += len(v)
-            boff += int(b.max()) + 1 if len(b) else 0
+        seen: set[bytes] = set()
+        for mesh, mesh_urls in urls.items():
+            for url in mesh_urls:
+                geo = self._geometry(mesh, url)
+                if geo is None or len(geo[0]) == 0:
+                    continue
+                v, f, _t, b = geo  # roof/wall type unused: buildings are one colour
+                # A border mesh's files are either city-partitioned (each city
+                # only its own buildings) or the identical mesh-wide content
+                # duplicated per city (2025 pref datasets): keep every distinct
+                # file, render identical content once.
+                digest = hashlib.sha1(v.tobytes() + f.tobytes()).digest()
+                if digest in seen:
+                    continue
+                seen.add(digest)
+                verts.append(v)
+                faces.append(f + voff)
+                vbid.append(b + boff)
+                voff += len(v)
+                boff += int(b.max()) + 1 if len(b) else 0
         if not verts:
             return None
 
