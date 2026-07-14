@@ -1,13 +1,14 @@
 """API routes."""
 from __future__ import annotations
 
+import trimesh
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
-from ..core.gpx import expand_bbox, parse_gpx
+from ..core.gpx import clip_track, expand_bbox, parse_bbox_param, parse_gpx
 from ..core.coloring import category_grid
 from ..core.mesh import MeshParams, make_projection, terrain_solid
 from ..core.terrain import fetch_elevation_grid
@@ -39,13 +40,18 @@ def generate(
     building_color: str = Form("#b0b0b0"),
     dem_zoom: int = Form(15),
     grid_max: int = Form(1000),
+    bbox: str = Form(""),
     fmt: str = Form("stl"),
 ) -> Response:
-    """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file."""
+    """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.
+
+    `bbox` ("min_lon,min_lat,max_lon,max_lat") overrides the automatic
+    track-plus-margin extent; the track is clipped to whatever area is used.
+    """
     try:
         track = parse_gpx(file.file.read())
-        bbox = expand_bbox(track.bbox)
-        grid = fetch_elevation_grid(bbox, zoom=dem_zoom, grid_max=grid_max)
+        area = parse_bbox_param(bbox) if bbox else expand_bbox(track.bbox)
+        grid = fetch_elevation_grid(area, zoom=dem_zoom, grid_max=grid_max)
         proj = make_projection(
             grid,
             MeshParams(
@@ -75,11 +81,24 @@ def generate(
             if bridge_body is not None:
                 bodies.append(bridge_body)
         if include_track:
-            # Keep the ridge at least one nozzle wide so it does not split.
-            bodies.append(Body(
-                track_ridge(track, proj, max(track_width_mm, min_feature_mm), track_height_mm),
-                "track",
-            ))
+            # Clip to the terrain actually built (a custom bbox may cut the
+            # track) so the ridge never overhangs the base; each in-area piece
+            # becomes its own sweep. Keep the ridge at least one nozzle wide
+            # so it does not split.
+            grid_extent = (
+                float(grid.lons.min()), float(grid.lats.min()),
+                float(grid.lons.max()), float(grid.lats.max()),
+            )
+            ridges = []
+            for seg in clip_track(track, grid_extent):
+                try:
+                    ridges.append(track_ridge(
+                        seg, proj, max(track_width_mm, min_feature_mm), track_height_mm
+                    ))
+                except ValueError:
+                    pass  # sliver that only grazes the border: nothing to sweep
+            if ridges:
+                bodies.append(Body(trimesh.util.concatenate(ridges), "track"))
 
         # "terrain" label (land-use off) maps to the user's terrain color.
         colors = {
