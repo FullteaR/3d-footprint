@@ -16,7 +16,7 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
   useEffect(() => {
     const mount = mountRef.current!;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf0f0f0);
+    scene.background = new THREE.Color(0xf3f5f9); // matches --bg in ui.css
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
     camera.position.set(0, 150, 150);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
