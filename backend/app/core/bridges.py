@@ -151,13 +151,19 @@ class PlateauBridgeProvider:
         np.savez_compressed(cache, verts=verts, faces=faces)
         return verts, faces
 
-    def bridge_body(self, proj: Projection, min_feature_mm: float = 0.8) -> Body | None:
+    def bridge_body(
+        self,
+        proj: Projection,
+        min_feature_mm: float = 0.8,
+        clip: shapely.Polygon | None = None,
+    ) -> Body | None:
         """One Body of every covered bridge, massed as deck slabs + ground pillars.
 
         Each connected span is reduced to a footprint, capped with a thick deck
         slab at the real deck elevation (so it tracks `vertical_scale`), and tied
         to the ground with stout pillars so nothing floats. `min_feature_mm` sets
-        the minimum printable width.
+        the minimum printable width. `clip` (lon/lat) replaces the grid rectangle
+        as the print outline when the model is a rotated rect / hexagon.
         """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
@@ -196,10 +202,13 @@ class PlateauBridgeProvider:
         # boundary keeps its inside portion instead of vanishing whole.
         clon = lon[faces].mean(axis=1)
         clat = lat[faces].mean(axis=1)
-        inside = (
-            (clon >= grid.lons.min()) & (clon <= grid.lons.max())
-            & (clat >= grid.lats.min()) & (clat <= grid.lats.max())
-        )
+        if clip is not None:
+            inside = shapely.contains_xy(clip, clon, clat)
+        else:
+            inside = (
+                (clon >= grid.lons.min()) & (clon <= grid.lons.max())
+                & (clat >= grid.lats.min()) & (clat <= grid.lats.max())
+            )
         faces = faces[inside]
         if len(faces) == 0:
             return None

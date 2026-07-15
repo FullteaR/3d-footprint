@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { MapPicker, type Bbox } from "./MapPicker";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MapPicker, fitBbox, normalizeBbox, type Bbox, type Shape } from "./MapPicker";
 import { Preview } from "./Preview";
 import "./ui.css";
 
@@ -29,18 +29,22 @@ export function App() {
   const [status, setStatus] = useState("");
   const [glb, setGlb] = useState<ArrayBuffer | null>(null);
   const [bbox, setBbox] = useState<Bbox | null>(null);
-  const [autoBbox, setAutoBbox] = useState<Bbox | null>(null);
+  const [shape, setShape] = useState<Shape>("rect");
+  const [rotation, setRotation] = useState(0);
   const [trackPts, setTrackPts] = useState<[number, number][]>([]);
+  // For the file-parse effect (which must not re-run on shape/rotation change).
+  const shapeRef = useRef(shape); shapeRef.current = shape;
+  const rotationRef = useRef(rotation); rotationRef.current = rotation;
 
   useEffect(() => {
     fetch("/api/health").then((r) => r.json()).then((d) => setHealth(d.status ?? "?")).catch(() => setHealth("unreachable"));
   }, []);
 
-  // Parse the GPX in the browser: track polyline for the map, plus the same
-  // automatic extent the backend would use (track bbox + 8% margin) as the
-  // initial model bbox.
+  // Parse the GPX in the browser: track polyline for the map, plus the
+  // automatic extent (track + 8% margin, in the current shape/rotation) as the
+  // initial model outline.
   useEffect(() => {
-    if (!file) { setAutoBbox(null); setBbox(null); setTrackPts([]); return; }
+    if (!file) { setBbox(null); setTrackPts([]); return; }
     let stale = false;
     file.text().then((text) => {
       if (stale) return;
@@ -54,20 +58,11 @@ export function App() {
         const lat = Number(p.getAttribute("lat"));
         if (Number.isFinite(lon) && Number.isFinite(lat)) pts.push([lat, lon]);
       }
-      if (!pts.length) { setAutoBbox(null); setBbox(null); setTrackPts([]); return; }
-      let lo0 = Infinity, lo1 = -Infinity, la0 = Infinity, la1 = -Infinity;
-      for (const [lat, lon] of pts) {
-        lo0 = Math.min(lo0, lon); lo1 = Math.max(lo1, lon);
-        la0 = Math.min(la0, lat); la1 = Math.max(la1, lat);
-      }
-      const dlon = Math.max(lo1 - lo0, 1e-3) * 0.08;
-      const dlat = Math.max(la1 - la0, 1e-3) * 0.08;
-      const bb: Bbox = [lo0 - dlon, la0 - dlat, lo1 + dlon, la1 + dlat];
+      if (!pts.length) { setBbox(null); setTrackPts([]); return; }
       // Cap the polyline so huge 1 Hz logs don't bog the map down.
       const stride = Math.max(1, Math.ceil(pts.length / 3000));
       setTrackPts(pts.filter((_, i) => i % stride === 0 || i === pts.length - 1));
-      setAutoBbox(bb);
-      setBbox(bb);
+      setBbox(fitBbox(pts, shapeRef.current, rotationRef.current));
     });
     return () => { stale = true; };
   }, [file]);
@@ -93,10 +88,12 @@ export function App() {
       f.append("track_color", trackColor);
       f.append("building_color", buildingColor);
       if (bboxParam) f.append("bbox", bboxParam);
+      f.append("shape", shape);
+      f.append("rotation_deg", String(rotation));
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, bboxParam]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, bboxParam, shape, rotation]
   );
 
   // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
@@ -105,13 +102,15 @@ export function App() {
     ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
   ];
 
-  // Enforce the backend's minimum span (0.001 deg per side) as the rectangle
-  // is dragged, expanding around the centre if the user makes it too small.
+  // Minimum span + shape aspect ratio are enforced centrally so every source
+  // (drag, shape switch, fit-to-track) yields a valid outline bbox.
   const onBboxChange = useCallback((bb: Bbox) => {
-    let [w, s, e, n] = bb;
-    if (e - w < 1e-3) { const c = (w + e) / 2; w = c - 5e-4; e = c + 5e-4; }
-    if (n - s < 1e-3) { const c = (s + n) / 2; s = c - 5e-4; n = c + 5e-4; }
-    setBbox([w, s, e, n]);
+    setBbox(normalizeBbox(bb, shapeRef.current));
+  }, []);
+
+  const onShapeChange = useCallback((sh: Shape) => {
+    setShape(sh);
+    setBbox((b) => (b ? normalizeBbox(b, sh) : b));
   }, []);
 
   // Generation only runs on the button, not on every tweak.
@@ -316,20 +315,42 @@ export function App() {
           <div className="card">
             <div className="card-head">
               <strong>モデル化する範囲</strong>
-              <span>角の■をドラッグして調整</span>
+              <select value={shape} onChange={(e) => onShapeChange(e.target.value as Shape)}>
+                <option value="rect">長方形</option>
+                <option value="square">正方形</option>
+                <option value="hex">正六角形</option>
+              </select>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                回転
+                <input
+                  type="number" step={5} value={rotation} style={{ width: 62 }}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v)) setRotation(v);
+                  }}
+                />°
+              </label>
+              <span>■サイズ・●回転・✥移動</span>
               {bbox && (
                 <span className="coords">
-                  西{bbox[0].toFixed(4)} 南{bbox[1].toFixed(4)} 東{bbox[2].toFixed(4)} 北{bbox[3].toFixed(4)}
+                  中心 {(((bbox[1] + bbox[3]) / 2)).toFixed(4)}, {(((bbox[0] + bbox[2]) / 2)).toFixed(4)}
                 </span>
               )}
               <span style={{ flex: 1 }} />
-              <button className="btn btn-ghost" onClick={() => autoBbox && setBbox(autoBbox)} disabled={!autoBbox}>
+              <button
+                className="btn btn-ghost"
+                onClick={() => { const bb = fitBbox(trackPts, shape, rotation); if (bb) setBbox(bb); }}
+                disabled={!trackPts.length}
+              >
                 軌跡に合わせる
               </button>
             </div>
             <div className="card-body map-box">
               {!file && <div className="overlay-hint">GPXを選択すると地図に軌跡と範囲を表示</div>}
-              <MapPicker points={trackPts} bbox={bbox} onBboxChange={onBboxChange} />
+              <MapPicker
+                points={trackPts} bbox={bbox} shape={shape} rotation={rotation}
+                onBboxChange={onBboxChange} onRotationChange={setRotation}
+              />
             </div>
           </div>
 

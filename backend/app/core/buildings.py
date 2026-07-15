@@ -30,6 +30,7 @@ import hashlib
 import mapbox_earcut as earcut
 import numpy as np
 import requests
+import shapely
 import trimesh
 from lxml import etree
 
@@ -232,7 +233,11 @@ class PlateauBuildingProvider:
         return verts, faces, ftype, vbid
 
     def building_body(
-        self, proj: Projection, height_scale: float = 1.0, min_feature_mm: float = 0.8
+        self,
+        proj: Projection,
+        height_scale: float = 1.0,
+        min_feature_mm: float = 0.8,
+        clip: shapely.Polygon | None = None,
     ) -> Body | None:
         """One Body of every covered building, massed as footprint blocks.
 
@@ -240,6 +245,8 @@ class PlateauBuildingProvider:
         plan) extruded to a clean block on the terrain. `height_scale` exaggerates
         block height (1.0 = real-world proportion); `min_feature_mm` is the minimum
         printable width, so thin buildings are thickened rather than lost.
+        `clip` (lon/lat) replaces the grid rectangle as the print outline when
+        the model is a rotated rect / hexagon.
         """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
@@ -290,10 +297,13 @@ class PlateauBuildingProvider:
         surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
 
         # Keep a building only if all its verts are inside the print footprint.
-        inside = (
-            (lon >= grid.lons.min()) & (lon <= grid.lons.max())
-            & (lat >= grid.lats.min()) & (lat <= grid.lats.max())
-        )
+        if clip is not None:
+            inside = shapely.contains_xy(clip, lon, lat)
+        else:
+            inside = (
+                (lon >= grid.lons.min()) & (lon <= grid.lons.max())
+                & (lat >= grid.lats.min()) & (lat <= grid.lats.max())
+            )
         keep_b = np.ones(nb, bool)
         np.logical_and.at(keep_b, vbid, inside)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import shapely
 import trimesh
 from scipy.ndimage import gaussian_filter
 
@@ -72,7 +73,12 @@ class Projection:
         return self.z_of(elev)
 
 
-def make_projection(grid: ElevationGrid, params: MeshParams) -> Projection:
+def make_projection(
+    grid: ElevationGrid, params: MeshParams, span_m: float | None = None
+) -> Projection:
+    """Build the print projection. `span_m` overrides the metric span that
+    `size_mm` maps onto — used when the model outline (rotated rect / hexagon)
+    is smaller than the fetched grid's bounding box."""
     elev = grid.elev.astype(np.float64)
     valid = np.isfinite(elev)
     if not valid.any():
@@ -81,9 +87,12 @@ def make_projection(grid: ElevationGrid, params: MeshParams) -> Projection:
     filled = np.where(valid, elev, emin)
 
     lat_mid = float(np.mean(grid.lats))
-    width = (grid.lons.max() - grid.lons.min()) * _M_PER_DEG_LON * np.cos(np.radians(lat_mid))
-    height = (grid.lats.max() - grid.lats.min()) * _M_PER_DEG_LAT
-    span = max(float(width), float(height), 1e-6)
+    if span_m is None:
+        width = (grid.lons.max() - grid.lons.min()) * _M_PER_DEG_LON * np.cos(np.radians(lat_mid))
+        height = (grid.lats.max() - grid.lats.min()) * _M_PER_DEG_LAT
+        span = max(float(width), float(height), 1e-6)
+    else:
+        span = max(float(span_m), 1e-6)
     scale = params.size_mm / span
 
     return Projection(
@@ -194,6 +203,7 @@ def terrain_solid(
     category_grid: np.ndarray | None = None,
     contour_sigma: float = 1.5,
     naturalize: bool = True,
+    clip: shapely.Polygon | None = None,
 ) -> list[Body]:
     """Build the terrain as one watertight solid *per colour*, full-height.
 
@@ -219,6 +229,12 @@ def terrain_solid(
     straightening are skipped entirely: every cell is emitted whole under the
     majority of its four corners, so colours follow raw grid-cell edges (the
     plain axis-aligned "squares" look) — nothing is filtered.
+
+    ``clip`` (a convex outline in print mm — rotated rect / regular hexagon)
+    restricts the solid to the cells whose centre falls inside it. The wall
+    pass walls every boundary edge anyway, so the cut stays watertight; the
+    staircase nodes along the cut are then snapped onto the outline so the
+    walls trace the exact edge (see the snap pass below).
     """
     grid = proj.grid
     ny, nx = grid.elev.shape
@@ -227,6 +243,18 @@ def terrain_solid(
     ztop = proj.z_of(proj.filled)                # (ny,nx)
     bottom_z = -proj.base_thickness_mm
     gx, gy = np.meshgrid(xs, ys)
+
+    keep_cell = None
+    if clip is not None:
+        shapely.prepare(clip)
+        ccx, ccy = np.meshgrid((xs[:-1] + xs[1:]) / 2, (ys[:-1] + ys[1:]) / 2)
+        keep_cell = shapely.contains_xy(
+            clip, ccx.ravel(), ccy.ravel()
+        ).reshape(ny - 1, nx - 1)
+        if not keep_cell.any():
+            raise ValueError("model outline does not overlap the terrain")
+        if keep_cell.all():
+            keep_cell = None                     # outline covers the whole grid
 
     if category_grid is not None:
         cats = sorted(set(np.asarray(category_grid).ravel().tolist()))
@@ -294,6 +322,10 @@ def terrain_solid(
 
         # Uniform cells (all four corners agree): emit two triangles in bulk.
         uni = (c00 == c01) & (c00 == c10) & (c00 == c11)
+        cut = ~uni
+        if keep_cell is not None:
+            uni = uni & keep_cell
+            cut = cut & keep_cell
         ur, uc = np.nonzero(uni)
         if ur.size:
             TL = ur * nx + uc
@@ -308,7 +340,7 @@ def terrain_solid(
                     tris[k].extend((t1[mk], t2[mk]))
 
         # Boundary cells: cut along the contour.
-        for r, c in zip(*(np.nonzero(~uni))):
+        for r, c in zip(*(np.nonzero(cut))):
             r, c = int(r), int(c)
             TL, TR = r * nx + c, r * nx + c + 1
             BR, BL = (r + 1) * nx + c + 1, (r + 1) * nx + c
@@ -355,7 +387,10 @@ def terrain_solid(
         else:
             cell_cat = np.zeros((ny - 1, nx - 1), np.int64)
         for k in range(K):
-            rr, cc = np.nonzero(cell_cat == k)
+            sel = cell_cat == k
+            if keep_cell is not None:
+                sel = sel & keep_cell
+            rr, cc = np.nonzero(sel)
             if rr.size:
                 TL = rr * nx + cc
                 tris[k].append(np.column_stack([TL, TL + 1, TL + nx + 1]))
@@ -374,6 +409,50 @@ def terrain_solid(
             np.concatenate(cross_P), np.concatenate(cross_Q),
             chords, eps=0.75 * cell_mm,
         )
+
+    # Snap the clip staircase onto the outline: every grid node touching both a
+    # kept and a dropped cell moves to the nearest point of the outline (z is
+    # re-sampled there), so the cut walls trace the exact rect/hexagon edge
+    # instead of grid-cell stairs. Each outline corner then claims its nearest
+    # boundary node so shape corners stay sharp. Only positions move — the
+    # topology (and per-colour watertightness) is untouched.
+    if keep_cell is not None:
+        kp = np.zeros((ny + 1, nx + 1), bool)
+        dp = np.zeros((ny + 1, nx + 1), bool)
+        kp[1:-1, 1:-1] = keep_cell
+        dp[1:-1, 1:-1] = ~keep_cell
+
+        def any4(a):  # per node: any of its (up to) four adjacent cells
+            return a[:-1, :-1] | a[:-1, 1:] | a[1:, :-1] | a[1:, 1:]
+
+        snap = any4(kp) & any4(dp)
+        # Where the outline touches the fetched grid's border (a hexagon's flat
+        # edge, a rotated rect's extreme corners) kept cells have no dropped
+        # neighbour, yet their border nodes can still stick out past the
+        # outline by up to a cell: snap those too.
+        edge = np.zeros((ny, nx), bool)
+        edge[[0, -1], :] = True
+        edge[:, [0, -1]] = True
+        esel = edge & any4(kp) & ~snap
+        if esel.any():
+            er, ec = np.nonzero(esel)
+            out = ~shapely.contains_xy(clip, gx[er, ec], gy[er, ec])
+            snap[er[out], ec[out]] = True
+        rr, cc = np.nonzero(snap)
+        if rr.size:
+            idx = rr * nx + cc
+            ring = clip.exterior
+            pts = shapely.points(top_all[idx, 0], top_all[idx, 1])
+            snapped = shapely.line_interpolate_point(
+                ring, shapely.line_locate_point(ring, pts)
+            )
+            sx, sy = shapely.get_x(snapped), shapely.get_y(snapped)
+            for vx, vy in np.asarray(ring.coords)[:-1]:
+                j = int(np.argmin((sx - vx) ** 2 + (sy - vy) ** 2))
+                sx[j], sy[j] = vx, vy
+            top_all[idx, 0] = sx
+            top_all[idx, 1] = sy
+            top_all[idx, 2] = proj.sample_z(proj.lon_of(sx), proj.lat_of(sy))
 
     vertices = np.vstack([top_all, top_all * [1, 1, 0] + [0, 0, bottom_z]])
 
