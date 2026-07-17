@@ -28,7 +28,8 @@ from ..config import DATA_DIR
 TILE_URL = "https://cyberjapandata.gsi.go.jp/xyz/{layer}/{z}/{x}/{y}.png"
 TILE_SIZE = 256
 INVALID = 1 << 23  # 0x800000
-MAX_TILES = 512  # guard against runaway bbox/zoom (z15 needs ~4x z14's tiles)
+MAX_TILES = 512  # mosaic memory guard (512 tiles ~ 270 MB of float64)
+MIN_ZOOM = 8     # dem_png overview floor; z8 tiles span ~150 km already
 DEM10_LAYER = "dem_png"            # 10 m, served up to z14
 DEM5_LAYERS = ("dem5a_png", "dem5b_png")  # 5 m, z15; tried in order
 
@@ -128,17 +129,29 @@ def _fetch_dem_tile(zoom: int, x: int, y: int) -> np.ndarray:
 def fetch_elevation_grid(
     bbox: tuple[float, float, float, float], zoom: int, grid_max: int
 ) -> ElevationGrid:
-    """Assemble a DEM mosaic over `bbox` and crop/downsample to <= grid_max cells/edge."""
+    """Assemble a DEM mosaic over `bbox` and crop/downsample to <= grid_max cells/edge.
+
+    Wide areas step the zoom down until the mosaic fits MAX_TILES (each step
+    quarters the tile count) instead of failing: the output is capped at
+    grid_max cells per edge anyway, so past that cap the extra tiles were
+    stride waste, not resolution — the printed model is unchanged.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
+
+    def _tile_range(z: int) -> tuple[int, int, int, int]:
+        xt0f, yt0f = _lonlat_to_tile(min_lon, max_lat, z)  # NW corner
+        xt1f, yt1f = _lonlat_to_tile(max_lon, min_lat, z)  # SE corner
+        return (int(math.floor(xt0f)), int(math.floor(xt1f)),
+                int(math.floor(yt0f)), int(math.floor(yt1f)))
+
+    xt0, xt1, yt0, yt1 = _tile_range(zoom)
+    while (xt1 - xt0 + 1) * (yt1 - yt0 + 1) > MAX_TILES and zoom > MIN_ZOOM:
+        zoom -= 1
+        xt0, xt1, yt0, yt1 = _tile_range(zoom)
     n = 2**zoom
 
-    xt0f, yt0f = _lonlat_to_tile(min_lon, max_lat, zoom)  # NW corner
-    xt1f, yt1f = _lonlat_to_tile(max_lon, min_lat, zoom)  # SE corner
-    xt0, xt1 = int(math.floor(xt0f)), int(math.floor(xt1f))
-    yt0, yt1 = int(math.floor(yt0f)), int(math.floor(yt1f))
-
     ntiles = (xt1 - xt0 + 1) * (yt1 - yt0 + 1)
-    if ntiles > MAX_TILES:
+    if ntiles > MAX_TILES:  # only reachable for a near-continental bbox
         raise ValueError(
             f"too many DEM tiles ({ntiles}); reduce area or zoom (max {MAX_TILES})"
         )
