@@ -13,6 +13,7 @@ from ..core.export import Body, export_bodies
 from ..core.gpx import clip_track, expand_bbox, parse_bbox_param, parse_gpx
 from ..core.coloring import category_grid
 from ..core.mesh import MeshParams, make_projection, terrain_solid
+from ..core.nameplate import nameplate_bodies
 from ..core.region import (
     Region, clip_track_to_polygon, parse_rotation_param, parse_shape_param,
 )
@@ -48,6 +49,10 @@ def generate(
     bbox: str = Form(""),
     shape: str = Form("rect"),
     rotation_deg: float = Form(0.0),
+    plate_svg: UploadFile | None = File(None),
+    plate_depth_mm: float = Form(16.0),
+    plate_relief_mm: float = Form(0.6),
+    label_color: str = Form("#333333"),
     fmt: str = Form("stl"),
 ) -> Response:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.
@@ -58,9 +63,14 @@ def generate(
     inscribed in the bbox, the outline is rotated about its centre on the map,
     everything is clipped to it, and the finished model is rotated back so the
     outline prints axis-aligned.
+
+    A `plate_svg` upload adds a 銘板: a slab hanging off the model's front
+    (south) edge with the SVG artwork raised on top (auto-fitted; text must
+    be outlined to paths by the design tool).
     """
     try:
         track = parse_gpx(file.file.read())
+        plate_data = plate_svg.file.read() if plate_svg is not None else b""
         area = parse_bbox_param(bbox) if bbox else expand_bbox(track.bbox)
         region = Region(
             bbox=area,
@@ -75,9 +85,10 @@ def generate(
                 vertical_scale=vertical_scale,
                 base_thickness_mm=base_thickness_mm,
             ),
-            # A rotated / hexagonal outline is smaller than the fetched grid's
-            # bounding box: size_mm applies to the outline itself.
-            span_m=None if region.is_plain else region.span_m,
+            # size_mm applies to the requested outline itself (not the fetched
+            # grid, which can snap a hair wider at DEM pixel edges) so the
+            # frontend's live scale readout is exactly the printed scale.
+            span_m=region.span_m,
         )
         clip_ll = clip_mm = None
         if not region.is_plain:
@@ -137,10 +148,26 @@ def generate(
         # Rotate the scene back so the outline prints axis-aligned at origin.
         region.to_print_frame(bodies, proj)
 
-        # "terrain" label (land-use off) maps to the user's terrain color.
+        if plate_data.strip():
+            # In the print frame the model's front edge lies on y=0; the plate
+            # spans it (a hexagon's flat bottom edge is its middle half).
+            if region.is_plain:
+                px0, px1 = 0.0, float(proj.x_of(grid.lons.max()))
+            else:
+                hw, _ = region.half_extents_m
+                w = 2.0 * hw * proj.scale
+                px0, px1 = (0.25 * w, 0.75 * w) if region.shape == "hex" else (0.0, w)
+            bodies += nameplate_bodies(
+                plate_data, px0, px1, 0.0,
+                base_thickness_mm, plate_depth_mm, plate_relief_mm,
+            )
+
+        # "terrain" label (land-use off) maps to the user's terrain color;
+        # the nameplate slab follows it so only the lettering stands out.
         colors = {
             "terrain": terrain_color, "track": track_color,
             "building": building_color,
+            "plate": terrain_color, "label": label_color,
         }
         data, content_type, ext = export_bodies(bodies, fmt, colors)
     except ValueError as e:

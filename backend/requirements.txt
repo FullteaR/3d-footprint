@@ -17,3 +17,6 @@ mapbox-earcut==1.0.3
 # Printability massing: 2D footprint algebra (union/buffer/simplify) for the
 # building/bridge デフォルメ
 shapely==2.0.6
+
+# 銘板 (nameplate): uploaded SVG -> path outlines (core/nameplate.py)
+svgelements==1.9.6

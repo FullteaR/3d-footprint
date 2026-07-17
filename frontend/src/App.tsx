@@ -1,7 +1,49 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MapPicker, fitBbox, normalizeBbox, type Bbox, type Shape } from "./MapPicker";
+import {
+  MapPicker, extentMeters, fitBbox, normalizeBbox, scaleBbox, spanMeters,
+  type Bbox, type Shape,
+} from "./MapPicker";
 import { Preview } from "./Preview";
 import "./ui.css";
+
+// 範囲 (real-world span) / 印刷サイズ / 縮尺 are one equation apart
+// (span_m = size_mm/1000 × denom): the locked one is frozen, editing either
+// of the others makes the remaining one follow.
+type Lock = "span" | "size" | "scale";
+
+// Number input that commits on blur / Enter — committed values can move the
+// map bbox, so per-keystroke commits (2 → 25 → 250…) would thrash the frame.
+function NumField({ value, min, max, step, digits = 0, disabled, onCommit }: {
+  value: number | null;
+  min: number;
+  max: number;
+  step?: number;
+  digits?: number;
+  disabled?: boolean;
+  onCommit: (v: number) => void;
+}) {
+  const fmt = (v: number | null) => (v == null ? "" : Number(v.toFixed(digits)).toString());
+  const [txt, setTxt] = useState(fmt(value));
+  useEffect(() => { setTxt(fmt(value)); }, [value]); // resync when the value is driven from elsewhere
+  const commit = () => {
+    const v = Number(txt);
+    if (txt.trim() !== "" && Number.isFinite(v)) {
+      const cl = Math.min(max, Math.max(min, v));
+      setTxt(fmt(cl));
+      onCommit(cl);
+    } else {
+      setTxt(fmt(value));
+    }
+  };
+  return (
+    <input
+      type="number" value={txt} min={min} max={max} step={step} disabled={disabled}
+      onChange={(e) => setTxt(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+    />
+  );
+}
 
 // Flow: pick a GPX -> the map shows the track and a draggable model bbox ->
 // tune every option -> 「3Dモデルを作成する」 generates the GLB preview
@@ -21,6 +63,12 @@ export function App() {
   const [includeBuildings, setIncludeBuildings] = useState(false);
   const [buildingScale, setBuildingScale] = useState(1);
   const [minFeature, setMinFeature] = useState(0.8);
+  const [includePlate, setIncludePlate] = useState(false);
+  const [plateSvg, setPlateSvg] = useState<File | null>(null);
+  const [plateUrl, setPlateUrl] = useState<string | null>(null);
+  const [plateDepth, setPlateDepth] = useState(16);
+  const [plateRelief, setPlateRelief] = useState(0.6);
+  const [labelColor, setLabelColor] = useState("#333333");
   const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
@@ -32,9 +80,49 @@ export function App() {
   const [shape, setShape] = useState<Shape>("rect");
   const [rotation, setRotation] = useState(0);
   const [trackPts, setTrackPts] = useState<[number, number][]>([]);
-  // For the file-parse effect (which must not re-run on shape/rotation change).
+  const [locked, setLocked] = useState<Lock>("size");
+  const [lockedDenom, setLockedDenom] = useState<number | null>(null);
+  // For the file-parse effect (which must not re-run on shape/rotation change)
+  // and the Leaflet callbacks (created once).
   const shapeRef = useRef(shape); shapeRef.current = shape;
   const rotationRef = useRef(rotation); rotationRef.current = rotation;
+  const bboxRef = useRef(bbox); bboxRef.current = bbox;
+  const lockedRef = useRef(locked); lockedRef.current = locked;
+  const lockedDenomRef = useRef(lockedDenom); lockedDenomRef.current = lockedDenom;
+
+  const SIZE_MIN = 20, SIZE_MAX = 300;
+
+  // Every bbox write goes through the lock: with the scale locked, the print
+  // size follows the frame (clamped to the printable range, which also stops
+  // an over-drag); the extent lock instead disables map resizing and reroutes
+  // fit-to-track through recentre().
+  const applyBbox = useCallback((raw: Bbox | null) => {
+    if (!raw) { setBbox(null); return; }
+    let bb = normalizeBbox(raw, shapeRef.current);
+    const d = lockedDenomRef.current;
+    if (lockedRef.current === "scale" && d) {
+      let size = (spanMeters(bb, shapeRef.current) * 1000) / d;
+      const cl = Math.min(SIZE_MAX, Math.max(SIZE_MIN, size));
+      if (cl !== size) {
+        bb = normalizeBbox(
+          scaleBbox(bb, ((cl * d) / 1000) / spanMeters(bb, shapeRef.current)),
+          shapeRef.current,
+        );
+        size = cl;
+      }
+      setSizeMm(size);
+    }
+    setBbox(bb);
+  }, []);
+
+  // Move the frame to `target`'s centre without resizing (for the extent lock).
+  const recentre = useCallback((target: Bbox) => {
+    const b = bboxRef.current;
+    if (!b) { applyBbox(target); return; }
+    const dlon = (target[0] + target[2]) / 2 - (b[0] + b[2]) / 2;
+    const dlat = (target[1] + target[3]) / 2 - (b[1] + b[3]) / 2;
+    setBbox([b[0] + dlon, b[1] + dlat, b[2] + dlon, b[3] + dlat]);
+  }, [applyBbox]);
 
   useEffect(() => {
     fetch("/api/health").then((r) => r.json()).then((d) => setHealth(d.status ?? "?")).catch(() => setHealth("unreachable"));
@@ -62,12 +150,82 @@ export function App() {
       // Cap the polyline so huge 1 Hz logs don't bog the map down.
       const stride = Math.max(1, Math.ceil(pts.length / 3000));
       setTrackPts(pts.filter((_, i) => i % stride === 0 || i === pts.length - 1));
-      setBbox(fitBbox(pts, shapeRef.current, rotationRef.current));
+      const fit = fitBbox(pts, shapeRef.current, rotationRef.current);
+      if (fit && lockedRef.current === "span" && bboxRef.current) recentre(fit);
+      else applyBbox(fit);
     });
     return () => { stale = true; };
-  }, [file]);
+  }, [file, applyBbox, recentre]);
+
+  // Object URL for the nameplate SVG preview.
+  useEffect(() => {
+    if (!plateSvg) { setPlateUrl(null); return; }
+    const u = URL.createObjectURL(plateSvg);
+    setPlateUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [plateSvg]);
 
   const bboxParam = bbox ? bbox.map((v) => v.toFixed(6)).join(",") : "";
+
+  const spanM = bbox ? spanMeters(bbox, shape) : null;
+  // While the scale is locked it is the anchor; otherwise it's derived.
+  const scaleDenom =
+    locked === "scale" && lockedDenom ? lockedDenom
+    : spanM ? (spanM * 1000) / sizeMm : null;
+
+  function lockTo(item: Lock) {
+    if (item === "scale") {
+      if (scaleDenom == null) return;
+      setLockedDenom(scaleDenom);
+    }
+    setLocked(item);
+  }
+
+  function commitSize(v: number) {
+    setSizeMm(v);
+    const b = bboxRef.current;
+    if (locked === "scale" && lockedDenom && b) {
+      const k = ((v / 1000) * lockedDenom) / spanMeters(b, shape);
+      setBbox(normalizeBbox(scaleBbox(b, k), shape));
+    }
+  }
+
+  function commitScale(d: number) {
+    const b = bboxRef.current;
+    if (!b) return;
+    if (locked === "size") {
+      const k = ((d * sizeMm) / 1000) / spanMeters(b, shape);
+      setBbox(normalizeBbox(scaleBbox(b, k), shape));
+    } else if (locked === "span") {
+      setSizeMm(Math.min(SIZE_MAX, Math.max(SIZE_MIN, (spanMeters(b, shape) * 1000) / d)));
+    }
+  }
+
+  const extentText = (() => {
+    if (!bbox) return "—";
+    const [w, h] = extentMeters(bbox);
+    const f = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
+    return `${f(w)} × ${f(h)}`;
+  })();
+
+  // Printed width of the nameplate slab (the model's front edge; a hexagon's
+  // flat bottom edge is its middle half) — for the preview's aspect ratio.
+  const plateWmm = (() => {
+    if (!bbox || !spanM) return sizeMm;
+    const mm = (sizeMm * extentMeters(bbox)[0]) / spanM;
+    return shape === "hex" ? mm / 2 : mm;
+  })();
+
+  const lockBtn = (item: Lock, disabled = false) => (
+    <button
+      className={`lock-btn${locked === item ? " on" : ""}`}
+      title={locked === item ? "固定中" : "この項目を固定する"}
+      disabled={disabled}
+      onClick={() => lockTo(item)}
+    >
+      {locked === item ? "🔒" : "🔓"}
+    </button>
+  );
 
   const buildForm = useCallback(
     (outFmt: string) => {
@@ -87,13 +245,19 @@ export function App() {
       f.append("terrain_color", terrainColor);
       f.append("track_color", trackColor);
       f.append("building_color", buildingColor);
+      if (includePlate && plateSvg) {
+        f.append("plate_svg", plateSvg);
+        f.append("plate_depth_mm", String(plateDepth));
+        f.append("plate_relief_mm", String(plateRelief));
+        f.append("label_color", labelColor);
+      }
       if (bboxParam) f.append("bbox", bboxParam);
       f.append("shape", shape);
       f.append("rotation_deg", String(rotation));
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, bboxParam, shape, rotation]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, shape, rotation]
   );
 
   // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
@@ -102,16 +266,15 @@ export function App() {
     ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
   ];
 
-  // Minimum span + shape aspect ratio are enforced centrally so every source
-  // (drag, shape switch, fit-to-track) yields a valid outline bbox.
-  const onBboxChange = useCallback((bb: Bbox) => {
-    setBbox(normalizeBbox(bb, shapeRef.current));
-  }, []);
+  // Minimum span + shape aspect ratio + the lock are enforced centrally so
+  // every source (drag, shape switch, fit-to-track) yields a valid bbox.
+  const onBboxChange = useCallback((bb: Bbox) => { applyBbox(bb); }, [applyBbox]);
 
   const onShapeChange = useCallback((sh: Shape) => {
+    shapeRef.current = sh; // applyBbox must see the new shape before the render
     setShape(sh);
-    setBbox((b) => (b ? normalizeBbox(b, sh) : b));
-  }, []);
+    if (bboxRef.current) applyBbox(bboxRef.current);
+  }, [applyBbox]);
 
   // Generation only runs on the button, not on every tweak.
   async function createModel() {
@@ -197,14 +360,39 @@ export function App() {
             )}
           </label>
 
+          <h3 className="section-title">大きさ・縮尺</h3>
+          <div className="row">
+            {lockBtn("span", !bbox)}
+            <label>範囲（実距離）</label>
+            <span className="val">{extentText}</span>
+          </div>
+          <div className="row">
+            {lockBtn("size")}
+            <label>印刷サイズ（最大辺 mm）</label>
+            <NumField value={sizeMm} min={SIZE_MIN} max={SIZE_MAX} step={5} digits={1} disabled={locked === "size"} onCommit={commitSize} />
+          </div>
+          <div className="row">
+            {lockBtn("scale", !bbox)}
+            <label>縮尺　1:</label>
+            <NumField value={scaleDenom == null ? null : Math.round(scaleDenom)} min={100} max={10000000} step={1000} disabled={!bbox || locked === "scale"} onCommit={commitScale} />
+          </div>
+          <div className="row presets">
+            {[25000, 50000].map((d) => (
+              <button key={d} className="btn btn-ghost btn-xs" disabled={!bbox || locked === "scale"} onClick={() => commitScale(d)}>
+                1:{d.toLocaleString()}
+              </button>
+            ))}
+          </div>
+          <p className="hint">
+            🔒の項目は固定。他の項目を動かすと、残りの項目が追従します。
+            範囲を固定すると地図の枠はリサイズ不可（移動・回転は可）になります。
+            縮尺を固定すると、枠のドラッグに印刷サイズが追従します。
+          </p>
+
           <h3 className="section-title">モデル</h3>
           <div className="row">
             <label>垂直強調<span className="val">×{verticalScale}</span></label>
             <input type="range" min={1} max={30} step={0.5} value={verticalScale} onChange={(e) => setVerticalScale(Number(e.target.value))} />
-          </div>
-          <div className="row">
-            <label>出力サイズ（最大辺 mm）</label>
-            <input type="number" min={20} max={300} value={sizeMm} onChange={(e) => setSizeMm(Number(e.target.value))} />
           </div>
           <div className="row">
             <label>底面厚（mm）</label>
@@ -290,6 +478,47 @@ export function App() {
             </>
           )}
 
+          <h3 className="section-title">銘板</h3>
+          <div className="row">
+            <label>銘板を付ける</label>
+            <input className="toggle" type="checkbox" checked={includePlate} onChange={(e) => setIncludePlate(e.target.checked)} />
+          </div>
+          {includePlate && (
+            <>
+              <label className={`dropzone slim${plateSvg ? " has-file" : ""}`}>
+                <input type="file" accept=".svg,image/svg+xml" onChange={(e) => setPlateSvg(e.target.files?.[0] ?? null)} />
+                {plateSvg ? (
+                  <div className="file-name">🏷️ {plateSvg.name}</div>
+                ) : (
+                  <div>銘板デザインのSVGを選択</div>
+                )}
+                <div className="sub">板の面（約{Math.round(plateWmm)}×{plateDepth}mm）に自動で収めます</div>
+              </label>
+              {plateUrl && (
+                <div className="plate-preview" style={{ aspectRatio: `${plateWmm} / ${plateDepth}`, background: terrainColor }}>
+                  <img src={plateUrl} alt="銘板プレビュー" />
+                </div>
+              )}
+              <p className="hint">
+                モデル手前に張り出す板に、SVGの塗り・線がそのまま凸になります。
+                文字はデザインツールで<b>アウトライン化</b>（パスに変換）してください（&lt;text&gt;要素は不可）。
+                実寸0.4mm未満の細線は印刷で潰れます。縮尺や日付は上の縮尺表示を見てSVGに直接入れてください。
+              </p>
+              <div className="row">
+                <label>板の奥行き（mm）</label>
+                <input type="number" min={4} max={40} step={1} value={plateDepth} onChange={(e) => setPlateDepth(Number(e.target.value))} />
+              </div>
+              <div className="row">
+                <label>凸の高さ（mm）</label>
+                <input type="number" min={0.2} max={2} step={0.1} value={plateRelief} onChange={(e) => setPlateRelief(Number(e.target.value))} />
+              </div>
+              <div className="row">
+                <label>凸部の色</label>
+                <input type="color" value={labelColor} onChange={(e) => setLabelColor(e.target.value)} />
+              </div>
+            </>
+          )}
+
           <hr className="divider" />
 
           <button className="btn btn-primary btn-block" onClick={createModel} disabled={busy || !file}>
@@ -330,7 +559,7 @@ export function App() {
                   }}
                 />°
               </label>
-              <span>■サイズ・●回転・✥移動</span>
+              <span>{locked === "span" ? "●回転・✥移動（実距離を固定中）" : "■サイズ・●回転・✥移動"}</span>
               {bbox && (
                 <span className="coords">
                   中心 {(((bbox[1] + bbox[3]) / 2)).toFixed(4)}, {(((bbox[0] + bbox[2]) / 2)).toFixed(4)}
@@ -339,16 +568,21 @@ export function App() {
               <span style={{ flex: 1 }} />
               <button
                 className="btn btn-ghost"
-                onClick={() => { const bb = fitBbox(trackPts, shape, rotation); if (bb) setBbox(bb); }}
+                onClick={() => {
+                  const bb = fitBbox(trackPts, shape, rotation);
+                  if (!bb) return;
+                  if (locked === "span" && bbox) recentre(bb); else applyBbox(bb);
+                }}
                 disabled={!trackPts.length}
               >
-                軌跡に合わせる
+                {locked === "span" ? "軌跡の中心へ" : "軌跡に合わせる"}
               </button>
             </div>
             <div className="card-body map-box">
               {!file && <div className="overlay-hint">GPXを選択すると地図に軌跡と範囲を表示</div>}
               <MapPicker
                 points={trackPts} bbox={bbox} shape={shape} rotation={rotation}
+                resizable={locked !== "span"}
                 onBboxChange={onBboxChange} onRotationChange={setRotation}
               />
             </div>

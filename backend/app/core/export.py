@@ -31,6 +31,8 @@ DEFAULT_COLORS: dict[str, str] = {
     "base": "#8a7f6f",
     "track": "#dc4628",
     "building": "#b0b0b0",  # buildings + bridges (same structure colour layer)
+    "plate": "#c2b280",     # nameplate slab (routes maps it to the terrain colour)
+    "label": "#333333",     # nameplate lettering
 }
 
 _FORMATS = {

@@ -8,6 +8,7 @@ backend/.venv/
 node_modules/
 frontend/dist/
 frontend/.vite/
+*.tsbuildinfo
 
 # Data caches (DEM / PLATEAU), mounted as a volume
 data/

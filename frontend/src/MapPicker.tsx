@@ -69,6 +69,31 @@ export function fitBbox(
      clon + hw / mlon, clat + hh / M_PER_DEG_LAT], shape);
 }
 
+// ---- size / scale helpers (must mirror backend region.half_extents_m) ------
+
+// Long edge of the model outline in metres — what size_mm maps onto
+// (backend region.span_m): rect = bbox long edge, square/hex = inscribed.
+export function spanMeters(bb: Bbox, shape: Shape): number {
+  const g = geoOf(bb);
+  if (shape === "square") return 2 * Math.min(g.hw, g.hh);
+  if (shape === "hex") return 2 * Math.min(g.hw, (2 * g.hh) / SQ3);
+  return 2 * Math.max(g.hw, g.hh);
+}
+
+// Printed footprint extents (width, height) in metres.
+export function extentMeters(bb: Bbox): [number, number] {
+  const g = geoOf(bb);
+  return [2 * g.hw, 2 * g.hh];
+}
+
+// Uniformly rescale the bbox about its centre by factor k (aspect preserved,
+// so the shape stays a true square / regular hexagon).
+export function scaleBbox(bb: Bbox, k: number): Bbox {
+  const clon = (bb[0] + bb[2]) / 2, clat = (bb[1] + bb[3]) / 2;
+  const hw = ((bb[2] - bb[0]) / 2) * k, hh = ((bb[3] - bb[1]) / 2) * k;
+  return [clon - hw, clat - hh, clon + hw, clat + hh];
+}
+
 // ---- local geometry helpers -------------------------------------------------
 
 type Geo = { clat: number; clon: number; mlon: number; hw: number; hh: number };
@@ -132,11 +157,12 @@ const moveIcon = L.divIcon({
 // OSM slippy map showing the GPX track, with the model outline (rect / square /
 // regular hexagon, rotatable) the user edits with three handles: corner ■ =
 // resize, ● above the top edge = rotate, centre ✥ = move.
-export function MapPicker({ points, bbox, shape, rotation, onBboxChange, onRotationChange }: {
+export function MapPicker({ points, bbox, shape, rotation, resizable = true, onBboxChange, onRotationChange }: {
   points: [number, number][]; // [lat, lon] in track order
   bbox: Bbox | null;          // unrotated shape extents
   shape: Shape;
   rotation: number;           // deg CCW
+  resizable?: boolean;        // false: fixed-extent frame, pan/rotate only
   onBboxChange: (bb: Bbox) => void;
   onRotationChange: (deg: number) => void;
 }) {
@@ -302,6 +328,17 @@ export function MapPicker({ points, bbox, shape, rotation, onBboxChange, onRotat
     }
     redraw(bbox, shape, rotation);
   }, [bbox, shape, rotation]);
+
+  // Corner handles follow the size/scale lock: with the real-world extent
+  // locked the frame can only pan and rotate. (bbox dep: the markers are
+  // created just above once the first bbox arrives.)
+  useEffect(() => {
+    for (const m of [swRef.current, neRef.current]) {
+      if (!m) continue;
+      if (resizable) { m.dragging?.enable(); m.setOpacity(1); }
+      else { m.dragging?.disable(); m.setOpacity(0.3); }
+    }
+  }, [resizable, bbox]);
 
   return <div ref={divRef} style={{ width: "100%", height: "100%" }} />;
 }
