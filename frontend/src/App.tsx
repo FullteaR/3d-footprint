@@ -409,6 +409,9 @@ export function App() {
           <p className="hint">
             上げるほど色分け・地形が細かく（建物/橋に近づく）なりますが、生成とプレビューが重くなります。
           </p>
+          <p className="hint">
+            出典表記（データ利用規約上の必須事項）: 底面に正式な出典（「出典: 国土地理院…を加工して作成」等、使用データに連動）を文字高さ約2.6mmで小さく凹刻印し、ダウンロードファイルにも同じ出典文を埋め込みます（3MF・GLB=メタデータ、STL=ヘッダ、ZIP=README）。
+          </p>
 
           <h3 className="section-title">色・土地利用</h3>
           <div className="row">
@@ -601,6 +604,15 @@ export function App() {
           </div>
         </div>
       </div>
+
+      <footer className="credits">
+        データ出典:{" "}
+        <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noreferrer">国土地理院（地理院タイル）</a>・
+        <a href="https://www.mlit.go.jp/plateau/" target="_blank" rel="noreferrer">国土交通省 Project PLATEAU</a>・
+        <a href="https://www.eorc.jaxa.jp/ALOS/jp/dataset/lulc_j.htm" target="_blank" rel="noreferrer">JAXA 高解像度土地利用土地被覆図</a>・
+        地図表示 © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors
+        <span className="credits-note">生成した模型・データを頒布する際も出典明記が必要です（詳細はREADME）</span>
+      </footer>
     </main>
   );
 }

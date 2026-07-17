@@ -32,6 +32,11 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
     const dir2 = new THREE.DirectionalLight(0xffffff, 0.6);
     dir2.position.set(-100, 120, -80);
     scene.add(dir2);
+    // Raking under-light: without it the underside gets only uniform
+    // ambient light and the engraved credit stamp is invisible.
+    const under = new THREE.DirectionalLight(0xffffff, 0.5);
+    under.position.set(200, -60, 50);
+    scene.add(under);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;

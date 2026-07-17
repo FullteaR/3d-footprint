@@ -17,6 +17,7 @@ from ..core.nameplate import nameplate_bodies
 from ..core.region import (
     Region, clip_track_to_polygon, parse_rotation_param, parse_shape_param,
 )
+from ..core.stamp import ascii_credit, engrave_credit, formal_credit
 from ..core.terrain import fetch_elevation_grid
 from ..core.track import track_ridge
 
@@ -148,15 +149,24 @@ def generate(
         # Rotate the scene back so the outline prints axis-aligned at origin.
         region.to_print_frame(bodies, proj)
 
+        # In the print frame the model's front edge lies on y=0; the plate and
+        # the credit stamp span it (a hexagon's flat bottom edge is its middle
+        # half).
+        if region.is_plain:
+            px0, px1 = 0.0, float(proj.x_of(grid.lons.max()))
+        else:
+            hw, _ = region.half_extents_m
+            w = 2.0 * hw * proj.scale
+            px0, px1 = (0.25 * w, 0.75 * w) if region.shape == "hex" else (0.0, w)
+
+        # 出典刻印 (always on — the data licenses require attribution): the
+        # formal 出典 sentence debossed on the underside travels with the
+        # print itself; the same sentence rides in the file metadata.
+        engrave_credit(
+            bodies, landuse, include_buildings, px0, px1, base_thickness_mm,
+        )
+
         if plate_data.strip():
-            # In the print frame the model's front edge lies on y=0; the plate
-            # spans it (a hexagon's flat bottom edge is its middle half).
-            if region.is_plain:
-                px0, px1 = 0.0, float(proj.x_of(grid.lons.max()))
-            else:
-                hw, _ = region.half_extents_m
-                w = 2.0 * hw * proj.scale
-                px0, px1 = (0.25 * w, 0.75 * w) if region.shape == "hex" else (0.0, w)
             bodies += nameplate_bodies(
                 plate_data, px0, px1, 0.0,
                 base_thickness_mm, plate_depth_mm, plate_relief_mm,
@@ -169,7 +179,11 @@ def generate(
             "building": building_color,
             "plate": terrain_color, "label": label_color,
         }
-        data, content_type, ext = export_bodies(bodies, fmt, colors)
+        data, content_type, ext = export_bodies(
+            bodies, fmt, colors,
+            credit_full=formal_credit(landuse, include_buildings),
+            credit_ascii=ascii_credit(landuse, include_buildings),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

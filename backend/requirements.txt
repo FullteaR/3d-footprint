@@ -20,3 +20,6 @@ shapely==2.0.6
 
 # 銘板 (nameplate): uploaded SVG -> path outlines (core/nameplate.py)
 svgelements==1.9.6
+
+# 裏面の出典刻印 (core/stamp.py): font glyph outlines for the debossed credit
+freetype-py==2.5.1

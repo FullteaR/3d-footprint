@@ -14,9 +14,11 @@ from __future__ import annotations
 import io
 import zipfile
 from dataclasses import dataclass
+from xml.sax.saxutils import escape
 
 import numpy as np
 import trimesh
+from trimesh.exchange import gltf
 
 # Default colour per label (hex). User overrides merge over this.
 DEFAULT_COLORS: dict[str, str] = {
@@ -102,8 +104,19 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
 
 
 def export_bodies(
-    bodies: list[Body], fmt: str, colors: dict[str, str] | None = None
+    bodies: list[Body],
+    fmt: str,
+    colors: dict[str, str] | None = None,
+    credit_full: str | None = None,
+    credit_ascii: str | None = None,
 ) -> tuple[bytes, str, str]:
+    """Serialize `bodies` to `fmt`.
+
+    `credit_full` (UTF-8 出典 sentence) and `credit_ascii` (80-byte-safe
+    variant) ride along in the file itself — 3MF metadata, the binary STL
+    header, the multi-STL zip's README, the glb's asset.copyright — so any
+    exported model keeps the attribution its data licenses require.
+    """
     if fmt not in _FORMATS:
         raise ValueError(f"unsupported format: {fmt}")
     content_type, ext = _FORMATS[fmt]
@@ -116,9 +129,9 @@ def export_bodies(
 
     if fmt == "stl":
         merged = trimesh.util.concatenate([b.mesh for b in bodies])
-        data = merged.export(file_type="stl")
+        data = _stl_with_header(merged, credit_ascii)
     elif fmt == "stl_multi":
-        data = _write_stl_multi(bodies, used, color_map)
+        data = _write_stl_multi(bodies, used, color_map, credit_full, credit_ascii)
     elif fmt == "glb":
         scene = trimesh.Scene()
         for i, b in enumerate(bodies):
@@ -140,16 +153,34 @@ def export_bodies(
                 rgb = np.array([palette[index_of[l]][1] for l in labels], np.uint8)
                 m.visual.face_colors = np.column_stack([rgb, np.full(len(rgb), 255, np.uint8)])
             scene.add_geometry(m, geom_name=f"body{i}")
-        data = scene.export(file_type="glb")
+        post = None
+        if credit_full:
+            # glTF's standard attribution slot; survives re-export by most tools.
+            def post(tree, _c=credit_full):
+                tree["asset"]["copyright"] = _c
+        data = gltf.export_glb(scene, tree_postprocessor=post)
     else:  # 3mf
-        data = _write_3mf(bodies, palette, index_of)
+        data = _write_3mf(bodies, palette, index_of, credit_full)
 
     if isinstance(data, str):
         data = data.encode()
     return data, content_type, ext
 
 
-def _write_stl_multi(bodies, used, color_map) -> bytes:
+def _stl_with_header(mesh: trimesh.Trimesh, credit_ascii: str | None) -> bytes:
+    """Binary STL with the attribution in its 80-byte header.
+
+    The header must not begin with "solid" (that's the ASCII-STL sniff);
+    "Source: ..." is safely different.
+    """
+    data = mesh.export(file_type="stl")
+    if not credit_ascii:
+        return data
+    hdr = credit_ascii.encode("ascii", "ignore")[:80].ljust(80, b" ")
+    return hdr + data[80:]
+
+
+def _write_stl_multi(bodies, used, color_map, credit_full=None, credit_ascii=None) -> bytes:
     """One STL per colour label, bundled in a zip (STL can't carry colour).
 
     Every STL shares the same coordinate space, so loading them all into a
@@ -172,19 +203,31 @@ def _write_stl_multi(bodies, used, color_map) -> bytes:
             if not parts:
                 continue
             mesh = parts[0] if len(parts) == 1 else trimesh.util.concatenate(parts)
-            z.writestr(f"{label}.stl", mesh.export(file_type="stl"))
+            z.writestr(f"{label}.stl", _stl_with_header(mesh, credit_ascii))
             lines.append(f"  {label}.stl  -> {color_map.get(label, '#999999')}")
+        if credit_full:
+            lines += ["", credit_full]
         z.writestr("README.txt", "\n".join(lines) + "\n")
     return buf.getvalue()
 
 
-def _write_3mf(bodies, palette, index_of) -> bytes:
+def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
     """3MF with a basematerials palette and one watertight object per body.
 
     Each triangle references its material via pid/p1 (per-face colour). Keeping
     bodies as separate objects preserves watertightness; slicers union the
-    overlapping parts and map each material colour to a filament.
+    overlapping parts and map each material colour to a filament. The 出典
+    sentence goes into the spec's model metadata (Copyright + Description —
+    the fields slicers actually surface).
     """
+    meta = ""
+    if credit_full:
+        esc = escape(credit_full)
+        meta = (
+            f'<metadata name="Copyright">{esc}</metadata>'
+            f'<metadata name="Description">{esc}</metadata>'
+            '<metadata name="Application">3d-footprint</metadata>'
+        )
     bases = "".join(
         f'<base name="{name}" displaycolor="#{r:02X}{g:02X}{b:02X}FF"/>'
         for name, (r, g, b) in palette
@@ -214,6 +257,7 @@ def _write_3mf(bodies, palette, index_of) -> bytes:
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<model unit="millimeter" xml:lang="en-US" '
         'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+        f"{meta}"
         "<resources>"
         f'<basematerials id="1">{bases}</basematerials>'
         f'{"".join(objects)}'

@@ -219,6 +219,17 @@ input[type="number"]:focus-visible, select:focus-visible {
   display: block;
 }
 
+/* ---------- data credits ---------- */
+.credits {
+  margin: 18px auto 10px;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+.credits a { color: var(--text-2); }
+.credits-note { display: block; }
+
 input[type="range"] {
   flex: 1;
   accent-color: var(--accent);
