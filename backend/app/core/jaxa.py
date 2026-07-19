@@ -16,6 +16,8 @@ import requests
 from PIL import Image
 
 from ..config import DATA_DIR
+from .net import atomic_write_bytes, session
+from .parallel import thread_map
 from .terrain import ElevationGrid
 
 TILE_URL = (
@@ -66,7 +68,7 @@ def _fetch_tile(li: int, la: int) -> np.ndarray | None:
         lat0=f"{la / 10:.2f}", lat1=f"{(la + 1) / 10:.2f}",
     )
     try:
-        resp = requests.get(url, headers={"User-Agent": "3d-footprint/0.1"}, timeout=60)
+        resp = session().get(url, timeout=60)
     except requests.RequestException:
         return None  # transient: retry on the next request, no marker
     if resp.status_code in (403, 404):  # S3 may answer either for a missing key
@@ -75,8 +77,7 @@ def _fetch_tile(li: int, la: int) -> np.ndarray | None:
         return None
     if resp.status_code != 200:
         return None
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(resp.content)
+    atomic_write_bytes(cache, resp.content)
     try:
         return np.asarray(Image.open(cache))
     except OSError:
@@ -93,22 +94,25 @@ def class_grid(grid: ElevationGrid) -> np.ndarray | None:
     lon2d, lat2d = np.meshgrid(grid.lons, grid.lats)
     out = np.zeros(lon2d.shape, np.uint8)
     covered = False
-    for la in range(math.floor(grid.lats[0] * 10), math.floor(grid.lats[-1] * 10) + 1):
-        for li in range(math.floor(grid.lons[0] * 10), math.floor(grid.lons[-1] * 10) + 1):
-            tile = _fetch_tile(li, la)
-            if tile is None:
-                continue
-            covered = True
-            lon_w, lat_s = li / 10, la / 10
-            m = (
-                (lon2d >= lon_w) & (lon2d < lon_w + TILE_DEG)
-                & (lat2d >= lat_s) & (lat2d < lat_s + TILE_DEG)
-            )
-            if not m.any():
-                continue
-            h, w = tile.shape
-            # GeoTIFF rows run north -> south.
-            rows = np.clip(((lat_s + TILE_DEG - lat2d[m]) * h / TILE_DEG).astype(int), 0, h - 1)
-            cols = np.clip(((lon2d[m] - lon_w) * w / TILE_DEG).astype(int), 0, w - 1)
-            out[m] = tile[rows, cols]
+    coords = [
+        (li, la)
+        for la in range(math.floor(grid.lats[0] * 10), math.floor(grid.lats[-1] * 10) + 1)
+        for li in range(math.floor(grid.lons[0] * 10), math.floor(grid.lons[-1] * 10) + 1)
+    ]
+    for (li, la), tile in zip(coords, thread_map(_fetch_tile, coords, 8)):
+        if tile is None:
+            continue
+        covered = True
+        lon_w, lat_s = li / 10, la / 10
+        m = (
+            (lon2d >= lon_w) & (lon2d < lon_w + TILE_DEG)
+            & (lat2d >= lat_s) & (lat2d < lat_s + TILE_DEG)
+        )
+        if not m.any():
+            continue
+        h, w = tile.shape
+        # GeoTIFF rows run north -> south.
+        rows = np.clip(((lat_s + TILE_DEG - lat2d[m]) * h / TILE_DEG).astype(int), 0, h - 1)
+        cols = np.clip(((lon2d[m] - lon_w) * w / TILE_DEG).astype(int), 0, w - 1)
+        out[m] = tile[rows, cols]
     return out if covered else None

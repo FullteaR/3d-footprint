@@ -24,6 +24,8 @@ from PIL import Image, ImageDraw
 
 from ..config import DATA_DIR
 from . import jaxa
+from .net import atomic_savez, session
+from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
 from .terrain import ElevationGrid
 
@@ -151,25 +153,31 @@ def _parse_luse(stream) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
     return coords, starts, codes, feats
 
 
+def _rings_cache_path(code: str, url: str):
+    key = hashlib.sha1(url.encode()).hexdigest()[:16]
+    return DATA_DIR / "plateau_luse" / f"{code}_{key}.npz"
+
+
 def _load_rings(code: str, url: str):
     """Parsed rings of one luse file, cached as npz (the GML parse is the slow bit)."""
-    key = hashlib.sha1(url.encode()).hexdigest()[:16]
-    cache = DATA_DIR / "plateau_luse" / f"{code}_{key}.npz"
+    cache = _rings_cache_path(code, url)
     if cache.is_file():
         z = np.load(cache)
         return z["coords"], z["starts"], z["codes"], z["feats"]
     try:
-        with requests.get(
-            url, headers={"User-Agent": "3d-footprint/0.1"}, stream=True, timeout=300
-        ) as resp:
+        with session().get(url, stream=True, timeout=300) as resp:
             resp.raise_for_status()
             resp.raw.decode_content = True
             coords, starts, codes, feats = _parse_luse(resp.raw)
     except (requests.RequestException, OSError, ValueError, etree.LxmlError):
         return None
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache, coords=coords, starts=starts, codes=codes, feats=feats)
+    atomic_savez(cache, coords=coords, starts=starts, codes=codes, feats=feats)
     return coords, starts, codes, feats
+
+
+def _warm_rings(code: str, url: str) -> bool:
+    """Parse-worker job: ensure one luse file's npz cache exists (True on success)."""
+    return _load_rings(code, url) is not None
 
 
 # Salt the painted-grid memo with the code->category mapping so editing the
@@ -187,10 +195,16 @@ def _paint(grid: ElevationGrid, files: list[tuple[str, str]]) -> tuple[np.ndarra
     img = Image.new("L", (nx, ny), 0)
     draw = ImageDraw.Draw(img)
 
+    # Download + parse every uncached luse file on the process pool first
+    # (per-file independent, CPU-heavy); the paint below then runs off the
+    # caches, in the exact same file order as before.
+    fresh = [f for f in files if not _rings_cache_path(*f).is_file()]
+    failed = {f for f, ok in zip(fresh, process_map(_warm_rings, fresh)) if not ok}
+
     all_loaded = True
     seen: set[bytes] = set()
     for code, url in files:
-        rings = _load_rings(code, url)
+        rings = None if (code, url) in failed else _load_rings(code, url)
         if rings is None:
             all_loaded = False
             continue

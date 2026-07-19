@@ -36,6 +36,8 @@ from lxml import etree
 
 from ..config import DATA_DIR
 from .export import Body
+from .net import atomic_savez, session
+from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
 from .massing import footprint_of, printable, prism
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
@@ -159,6 +161,68 @@ def _rings(poly: etree._Element) -> tuple[np.ndarray, list[np.ndarray]]:
     return ext, [h for h in holes if len(h) >= 3]
 
 
+def _geometry_cache_path(mesh: str, url: str):
+    key = hashlib.sha1(url.encode()).hexdigest()[:16]
+    return DATA_DIR / "buildings" / f"{mesh}_{key}.npz"
+
+
+def _geometry(mesh: str, url: str):
+    """Cached geographic geometry for one bldg GML.
+
+    Returns (verts (N,3) lon/lat/h, faces (M,3), ftype (M,), vbid (N,)).
+    Module-level so `process_map` can ship it to parse workers by reference.
+    """
+    cache = _geometry_cache_path(mesh, url)
+    if cache.is_file():
+        d = np.load(cache)
+        return d["verts"], d["faces"], d["ftype"], d["vbid"]
+
+    lat_mid = (int(mesh[:2]) / 1.5) + 0.5  # rough, just for the metric basis
+    all_v, all_f, all_t, all_b = [], [], [], []
+    voff = bid = 0
+    try:
+        with session().get(url, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            resp.raw.decode_content = True
+            for _, b in etree.iterparse(resp.raw, tag=_BUILDING_TAG):
+                started = voff
+                for label, ext, holes in _building_polygons(b):
+                    if len(ext) < 3:
+                        continue
+                    tri = _triangulate(ext, holes, lat_mid)
+                    if tri is None:
+                        continue
+                    pts, faces = tri
+                    all_v.append(pts)
+                    all_f.append(faces + voff)
+                    all_t.append(np.full(len(faces), _LABELS.index(label), np.uint8))
+                    voff += len(pts)
+                if voff > started:
+                    all_b.append(np.full(voff - started, bid, np.int32))
+                    bid += 1
+                b.clear()
+    except (requests.RequestException, OSError, ValueError):
+        return None
+
+    if not all_v:
+        verts = np.empty((0, 3), np.float32)
+        faces = np.empty((0, 3), np.int32)
+        ftype = np.empty(0, np.uint8)
+        vbid = np.empty(0, np.int32)
+    else:
+        verts = np.vstack(all_v).astype(np.float32)
+        faces = np.vstack(all_f).astype(np.int32)
+        ftype = np.concatenate(all_t)
+        vbid = np.concatenate(all_b)
+    atomic_savez(cache, verts=verts, faces=faces, ftype=ftype, vbid=vbid)
+    return verts, faces, ftype, vbid
+
+
+def _warm_geometry(mesh: str, url: str) -> bool:
+    """Parse-worker job: ensure one GML's npz cache exists (True on success)."""
+    return _geometry(mesh, url) is not None
+
+
 class PlateauBuildingProvider:
     """PLATEAU LOD2/LOD1 building provider. Covers PLATEAU cities only."""
 
@@ -177,60 +241,6 @@ class PlateauBuildingProvider:
                 if mesh in wanted and url and url not in out.setdefault(mesh, []):
                     out[mesh].append(url)
         return {m: u for m, u in out.items() if u}
-
-    def _geometry(self, mesh: str, url: str):
-        """Cached geographic geometry for one bldg GML.
-
-        Returns (verts (N,3) lon/lat/h, faces (M,3), ftype (M,), vbid (N,)).
-        """
-        key = hashlib.sha1(url.encode()).hexdigest()[:16]
-        cache = DATA_DIR / "buildings" / f"{mesh}_{key}.npz"
-        if cache.is_file():
-            d = np.load(cache)
-            return d["verts"], d["faces"], d["ftype"], d["vbid"]
-
-        lat_mid = (int(mesh[:2]) / 1.5) + 0.5  # rough, just for the metric basis
-        all_v, all_f, all_t, all_b = [], [], [], []
-        voff = bid = 0
-        try:
-            with requests.get(
-                url, headers={"User-Agent": "3d-footprint/0.1"}, stream=True, timeout=600
-            ) as resp:
-                resp.raise_for_status()
-                resp.raw.decode_content = True
-                for _, b in etree.iterparse(resp.raw, tag=_BUILDING_TAG):
-                    started = voff
-                    for label, ext, holes in _building_polygons(b):
-                        if len(ext) < 3:
-                            continue
-                        tri = _triangulate(ext, holes, lat_mid)
-                        if tri is None:
-                            continue
-                        pts, faces = tri
-                        all_v.append(pts)
-                        all_f.append(faces + voff)
-                        all_t.append(np.full(len(faces), _LABELS.index(label), np.uint8))
-                        voff += len(pts)
-                    if voff > started:
-                        all_b.append(np.full(voff - started, bid, np.int32))
-                        bid += 1
-                    b.clear()
-        except (requests.RequestException, OSError, ValueError):
-            return None
-
-        if not all_v:
-            verts = np.empty((0, 3), np.float32)
-            faces = np.empty((0, 3), np.int32)
-            ftype = np.empty(0, np.uint8)
-            vbid = np.empty(0, np.int32)
-        else:
-            verts = np.vstack(all_v).astype(np.float32)
-            faces = np.vstack(all_f).astype(np.int32)
-            ftype = np.concatenate(all_t)
-            vbid = np.concatenate(all_b)
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, verts=verts, faces=faces, ftype=ftype, vbid=vbid)
-        return verts, faces, ftype, vbid
 
     def building_body(
         self,
@@ -254,12 +264,22 @@ class PlateauBuildingProvider:
         if not urls:
             return None
 
+        # First use of an area: download + parse every uncached GML on the
+        # process pool (per-file independent, CPU-heavy). Failed files stay
+        # uncached and are skipped below — same as the sequential behaviour,
+        # minus a second download attempt.
+        pairs = [(m, u) for m, us in urls.items() for u in us]
+        fresh = [p for p in pairs if not _geometry_cache_path(*p).is_file()]
+        failed = {p for p, ok in zip(fresh, process_map(_warm_geometry, fresh)) if not ok}
+
         verts, faces, vbid = [], [], []
         voff = boff = 0
         seen: set[bytes] = set()
         for mesh, mesh_urls in urls.items():
             for url in mesh_urls:
-                geo = self._geometry(mesh, url)
+                if (mesh, url) in failed:
+                    continue
+                geo = _geometry(mesh, url)
                 if geo is None or len(geo[0]) == 0:
                     continue
                 v, f, _t, b = geo  # roof/wall type unused: buildings are one colour

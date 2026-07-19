@@ -20,13 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import requests
 from PIL import Image
 
 from ..config import DATA_DIR
+from .net import atomic_write_bytes, keyed_lock, session
+from .parallel import thread_map
 
 TILE_URL = "https://cyberjapandata.gsi.go.jp/xyz/{layer}/{z}/{x}/{y}.png"
 TILE_SIZE = 256
+TILE_WORKERS = 16  # concurrent tile downloads (I/O-bound; a tile is a few KB)
 INVALID = 1 << 23  # 0x800000
 MAX_TILES = 512  # mosaic memory guard (512 tiles ~ 270 MB of float64)
 MIN_ZOOM = 8     # dem_png overview floor; z8 tiles span ~150 km already
@@ -63,7 +65,10 @@ def _fetch_raw(layer: str, z: int, x: int, y: int) -> np.ndarray | None:
     """Fetch one source tile (on-disk cache). None if the tile is absent (404).
 
     A 404 is recorded with an empty ``.absent`` marker so repeated previews
-    don't re-request tiles outside a layer's coverage.
+    don't re-request tiles outside a layer's coverage. Parallel mosaic workers
+    can want the same tile at once (2x2 z15 neighbours share one z14 fallback
+    tile), so the fetch is deduped with a per-tile lock and the cache write is
+    atomic — a concurrent reader never sees a torn file.
     """
     cache = DATA_DIR / layer / str(z) / str(x) / f"{y}.png"
     absent = cache.with_suffix(".absent")
@@ -72,17 +77,21 @@ def _fetch_raw(layer: str, z: int, x: int, y: int) -> np.ndarray | None:
     if absent.is_file():
         return None
 
-    url = TILE_URL.format(layer=layer, z=z, x=x, y=y)
-    resp = requests.get(url, headers={"User-Agent": "3d-footprint/0.1"}, timeout=20)
-    if resp.status_code == 404:
-        absent.parent.mkdir(parents=True, exist_ok=True)
-        absent.touch()
-        return None
-    resp.raise_for_status()
+    with keyed_lock((layer, z, x, y)):
+        if cache.is_file():  # another worker fetched it while we waited
+            return _decode_tile(cache.read_bytes())
+        if absent.is_file():
+            return None
+        url = TILE_URL.format(layer=layer, z=z, x=x, y=y)
+        resp = session().get(url, timeout=20)
+        if resp.status_code == 404:
+            absent.parent.mkdir(parents=True, exist_ok=True)
+            absent.touch()
+            return None
+        resp.raise_for_status()
 
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(resp.content)
-    return _decode_tile(resp.content)
+        atomic_write_bytes(cache, resp.content)
+        return _decode_tile(resp.content)
 
 
 def _fetch_dem_tile(zoom: int, x: int, y: int) -> np.ndarray:
@@ -156,16 +165,19 @@ def fetch_elevation_grid(
             f"too many DEM tiles ({ntiles}); reduce area or zoom (max {MAX_TILES})"
         )
 
-    # Mosaic covering the whole tile range.
+    # Mosaic covering the whole tile range. Tiles are independent HTTP GETs,
+    # so they download in parallel; pasting stays sequential.
+    coords = [(tx, ty) for ty in range(yt0, yt1 + 1) for tx in range(xt0, xt1 + 1)]
+    tiles = thread_map(
+        lambda tx, ty: _fetch_dem_tile(zoom, tx, ty), coords, TILE_WORKERS
+    )
     mosaic = np.full(
         ((yt1 - yt0 + 1) * TILE_SIZE, (xt1 - xt0 + 1) * TILE_SIZE), np.nan
     )
-    for ty in range(yt0, yt1 + 1):
-        for tx in range(xt0, xt1 + 1):
-            tile = _fetch_dem_tile(zoom, tx, ty)
-            ry = (ty - yt0) * TILE_SIZE
-            rx = (tx - xt0) * TILE_SIZE
-            mosaic[ry : ry + TILE_SIZE, rx : rx + TILE_SIZE] = tile
+    for (tx, ty), tile in zip(coords, tiles):
+        ry = (ty - yt0) * TILE_SIZE
+        rx = (tx - xt0) * TILE_SIZE
+        mosaic[ry : ry + TILE_SIZE, rx : rx + TILE_SIZE] = tile
 
     # Geographic coordinate of each mosaic pixel center.
     gx0 = xt0 * TILE_SIZE

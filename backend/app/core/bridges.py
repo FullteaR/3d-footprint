@@ -40,6 +40,8 @@ from shapely.geometry import box
 from ..config import DATA_DIR
 from .buildings import _mesh3_codes, _rings, _triangulate
 from .export import Body
+from .net import atomic_savez, session
+from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
 from .massing import footprint_of, printable, prism
 from .mesh import Projection
@@ -90,6 +92,59 @@ def _bridge_polygons(bridge: etree._Element):
         yield _rings(poly)
 
 
+def _geometry_cache_path(mesh: str, url: str):
+    key = hashlib.sha1(url.encode()).hexdigest()[:16]
+    return DATA_DIR / "bridges" / f"{mesh}_{key}.npz"
+
+
+def _geometry(mesh: str, url: str):
+    """Cached geographic geometry for one brid GML.
+
+    Returns (verts (N,3) lon/lat/h, faces (M,3)) or None on failure.
+    Module-level so `process_map` can ship it to parse workers by reference.
+    """
+    cache = _geometry_cache_path(mesh, url)
+    if cache.is_file():
+        d = np.load(cache)
+        return d["verts"], d["faces"]
+
+    lat_mid = (int(mesh[:2]) / 1.5) + 0.5  # rough, just for the metric basis
+    all_v, all_f = [], []
+    voff = 0
+    try:
+        with session().get(url, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            resp.raw.decode_content = True
+            for _, b in etree.iterparse(resp.raw, tag=_BRIDGE_TAG):
+                for ext, holes in _bridge_polygons(b):
+                    if len(ext) < 3:
+                        continue
+                    tri = _triangulate(ext, holes, lat_mid)
+                    if tri is None:
+                        continue
+                    pts, faces = tri
+                    all_v.append(pts)
+                    all_f.append(faces + voff)
+                    voff += len(pts)
+                b.clear()
+    except (requests.RequestException, OSError, ValueError):
+        return None
+
+    if not all_v:
+        verts = np.empty((0, 3), np.float32)
+        faces = np.empty((0, 3), np.int32)
+    else:
+        verts = np.vstack(all_v).astype(np.float32)
+        faces = np.vstack(all_f).astype(np.int32)
+    atomic_savez(cache, verts=verts, faces=faces)
+    return verts, faces
+
+
+def _warm_geometry(mesh: str, url: str) -> bool:
+    """Parse-worker job: ensure one GML's npz cache exists (True on success)."""
+    return _geometry(mesh, url) is not None
+
+
 class PlateauBridgeProvider:
     """PLATEAU brid (bridge) provider. Covers PLATEAU cities only."""
 
@@ -105,51 +160,6 @@ class PlateauBridgeProvider:
                 if mesh in wanted and url and url not in out.setdefault(mesh, []):
                     out[mesh].append(url)
         return {m: u for m, u in out.items() if u}
-
-    def _geometry(self, mesh: str, url: str):
-        """Cached geographic geometry for one brid GML.
-
-        Returns (verts (N,3) lon/lat/h, faces (M,3)) or None on failure.
-        """
-        key = hashlib.sha1(url.encode()).hexdigest()[:16]
-        cache = DATA_DIR / "bridges" / f"{mesh}_{key}.npz"
-        if cache.is_file():
-            d = np.load(cache)
-            return d["verts"], d["faces"]
-
-        lat_mid = (int(mesh[:2]) / 1.5) + 0.5  # rough, just for the metric basis
-        all_v, all_f = [], []
-        voff = 0
-        try:
-            with requests.get(
-                url, headers={"User-Agent": "3d-footprint/0.1"}, stream=True, timeout=600
-            ) as resp:
-                resp.raise_for_status()
-                resp.raw.decode_content = True
-                for _, b in etree.iterparse(resp.raw, tag=_BRIDGE_TAG):
-                    for ext, holes in _bridge_polygons(b):
-                        if len(ext) < 3:
-                            continue
-                        tri = _triangulate(ext, holes, lat_mid)
-                        if tri is None:
-                            continue
-                        pts, faces = tri
-                        all_v.append(pts)
-                        all_f.append(faces + voff)
-                        voff += len(pts)
-                    b.clear()
-        except (requests.RequestException, OSError, ValueError):
-            return None
-
-        if not all_v:
-            verts = np.empty((0, 3), np.float32)
-            faces = np.empty((0, 3), np.int32)
-        else:
-            verts = np.vstack(all_v).astype(np.float32)
-            faces = np.vstack(all_f).astype(np.int32)
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, verts=verts, faces=faces)
-        return verts, faces
 
     def bridge_body(
         self,
@@ -171,12 +181,20 @@ class PlateauBridgeProvider:
         if not urls:
             return None
 
+        # Parse every uncached GML on the process pool (see buildings.py);
+        # failed files are skipped below, exactly as before.
+        pairs = [(m, u) for m, us in urls.items() for u in us]
+        fresh = [p for p in pairs if not _geometry_cache_path(*p).is_file()]
+        failed = {p for p, ok in zip(fresh, process_map(_warm_geometry, fresh)) if not ok}
+
         verts, faces = [], []
         voff = 0
         seen: set[bytes] = set()
         for mesh, mesh_urls in urls.items():
             for url in mesh_urls:
-                geo = self._geometry(mesh, url)
+                if (mesh, url) in failed:
+                    continue
+                geo = _geometry(mesh, url)
                 if geo is None or len(geo[0]) == 0:
                     continue
                 v, f = geo
