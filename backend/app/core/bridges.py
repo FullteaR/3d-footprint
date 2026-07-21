@@ -172,7 +172,7 @@ class PlateauBridgeProvider:
         Each connected span is reduced to a footprint, capped with a thick deck
         slab at the real deck elevation (so it tracks `vertical_scale`), and tied
         to the ground with stout pillars so nothing floats. `min_feature_mm` sets
-        the minimum printable width. `clip` (lon/lat) replaces the grid rectangle
+        the minimum printable width. `clip` (print mm) replaces the grid rectangle
         as the print outline when the model is a rotated rect / hexagon.
         """
         grid = proj.grid
@@ -216,18 +216,22 @@ class PlateauBridgeProvider:
         xy = np.column_stack([proj.x_of(lon), proj.y_of(lat)])  # print mm
         z_real = proj.z_of(h)  # deck elevation in mm (tracks vertical_scale)
 
-        # Clip to the print footprint by face centroid, so a bridge crossing the
-        # boundary keeps its inside portion instead of vanishing whole.
-        clon = lon[faces].mean(axis=1)
-        clat = lat[faces].mean(axis=1)
-        if clip is not None:
-            inside = shapely.contains_xy(clip, clon, clat)
-        else:
-            inside = (
-                (clon >= grid.lons.min()) & (clon <= grid.lons.max())
-                & (clat >= grid.lats.min()) & (clat <= grid.lats.max())
+        # The print outline, in the same mm frame as the footprints: the model's
+        # own (rotated rect / hexagon) or, by default, the fetched grid rectangle.
+        if clip is None:
+            clip = box(
+                float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
+                float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
             )
-        faces = faces[inside]
+        shapely.prepare(clip)
+
+        # Clip to the print footprint by face centroid, so a bridge crossing the
+        # boundary keeps its inside portion instead of vanishing whole. A deck
+        # triangle spans tens of metres, so this only decides which faces feed
+        # the footprint — `printable` below cuts it flush with the outline.
+        faces = faces[shapely.contains_xy(
+            clip, xy[faces, 0].mean(axis=1), xy[faces, 1].mean(axis=1)
+        )]
         if len(faces) == 0:
             return None
 
@@ -237,7 +241,7 @@ class PlateauBridgeProvider:
             return None
         pieces: list[trimesh.Trimesh] = []
         for span in getattr(fp_all, "geoms", [fp_all]):
-            sp = printable(span, min_feature_mm)
+            sp = printable(span, min_feature_mm, clip)
             if sp is None:
                 continue
             for poly in getattr(sp, "geoms", [sp]):

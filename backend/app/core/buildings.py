@@ -15,7 +15,9 @@ of its triangles in plan) extruded to a clean block — its real height x a
 `height_scale` knob (with a floor so short buildings still read) and a minimum
 printable width `min_feature_mm` so thin ones survive instead of vanishing (the
 massing happens in massing.py). All faces share a single "building" colour; the
-block base is embedded so it fuses to the terrain surface.
+block base is embedded so it fuses to the terrain surface, and every block is
+trimmed to the model outline — one that straddles the edge is cut flush with it
+rather than dropped, and none overhangs the printed edge.
 
 Polygons (lat/lon/height, EPSG 6697; height is 標高 T.P., same datum as the
 GSI DEM) are triangulated once and cached per mesh as a compact npz in
@@ -33,6 +35,7 @@ import requests
 import shapely
 import trimesh
 from lxml import etree
+from shapely.geometry import box
 
 from ..config import DATA_DIR
 from .export import Body
@@ -254,9 +257,10 @@ class PlateauBuildingProvider:
         Each building is reduced to its footprint (the union of its triangles in
         plan) extruded to a clean block on the terrain. `height_scale` exaggerates
         block height (1.0 = real-world proportion); `min_feature_mm` is the minimum
-        printable width, so thin buildings are thickened rather than lost.
-        `clip` (lon/lat) replaces the grid rectangle as the print outline when
-        the model is a rotated rect / hexagon.
+        printable width, so thin buildings are thickened rather than lost. Blocks
+        are cut flush with the print outline, so the model edge reads as one clean
+        slice through the city. `clip` (print mm) replaces the grid rectangle as
+        that outline when the model is a rotated rect / hexagon.
         """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
@@ -316,16 +320,21 @@ class PlateauBuildingProvider:
         clat = np.bincount(vbid, lat, minlength=nb) / counts
         surface = proj.sample_z(clon, clat)  # terrain surface (mm) under each building
 
-        # Keep a building only if all its verts are inside the print footprint.
-        if clip is not None:
-            inside = shapely.contains_xy(clip, lon, lat)
-        else:
-            inside = (
-                (lon >= grid.lons.min()) & (lon <= grid.lons.max())
-                & (lat >= grid.lats.min()) & (lat <= grid.lats.max())
+        # The print outline, in the same mm frame as the footprints: the model's
+        # own (rotated rect / hexagon) or, by default, the fetched grid rectangle.
+        if clip is None:
+            clip = box(
+                float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
+                float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
             )
-        keep_b = np.ones(nb, bool)
-        np.logical_and.at(keep_b, vbid, inside)
+        shapely.prepare(clip)
+
+        # Keep every building that reaches into the print footprint at all: one
+        # straddling the outline is cut flush with it by the massing trim below,
+        # the same way a bridge crossing the boundary keeps its inside portion.
+        inside = shapely.contains_xy(clip, xy[:, 0], xy[:, 1])
+        keep_b = np.zeros(nb, bool)
+        keep_b[vbid[inside]] = True
 
         # Group faces by building so each footprint is unioned independently.
         face_bid = vbid[faces[:, 0]]
@@ -337,7 +346,9 @@ class PlateauBuildingProvider:
         for b in range(nb):
             if not keep_b[b]:
                 continue
-            fp = printable(footprint_of(xy, faces_s[bounds[b]:bounds[b + 1]]), min_feature_mm)
+            fp = printable(
+                footprint_of(xy, faces_s[bounds[b]:bounds[b + 1]]), min_feature_mm, clip
+            )
             if fp is None:
                 continue
             # Real height x exaggeration, floored so short blocks still read.

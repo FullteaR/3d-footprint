@@ -1,7 +1,6 @@
 """API routes."""
 from __future__ import annotations
 
-import shapely
 import trimesh
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -93,9 +92,8 @@ def generate(
         )
         clip_ll = clip_mm = None
         if not region.is_plain:
-            clip_ll = region.polygon_lonlat()
-            shapely.prepare(clip_ll)
-            clip_mm = region.polygon_mm(proj)
+            clip_ll = region.polygon_lonlat()   # for the track (lon/lat)
+            clip_mm = region.polygon_mm(proj)   # for terrain / buildings / bridges
 
         cat_grid = None
         if landuse:
@@ -109,12 +107,12 @@ def generate(
             # the minimum printable width), differing only in placement: buildings
             # sit on the surface, bridges keep their real deck elevation + pillars.
             building_body = PlateauBuildingProvider().building_body(
-                proj, building_scale, min_feature_mm, clip=clip_ll
+                proj, building_scale, min_feature_mm, clip=clip_mm
             )
             if building_body is not None:
                 bodies.append(building_body)
             bridge_body = PlateauBridgeProvider().bridge_body(
-                proj, min_feature_mm, clip=clip_ll
+                proj, min_feature_mm, clip=clip_mm
             )
             if bridge_body is not None:
                 bodies.append(bridge_body)

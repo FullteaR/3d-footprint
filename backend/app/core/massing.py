@@ -42,13 +42,26 @@ def footprint_of(xy: np.ndarray, faces: np.ndarray):
     return fp if not fp.is_empty else None
 
 
-def printable(geom, min_feature: float):
+def _polygon_parts(geom) -> list:
+    """The polygonal parts of any geometry (a clip can also yield lines/points)."""
+    if isinstance(geom, Polygon):
+        return [geom] if not geom.is_empty and geom.area > 0 else []
+    return [p for g in getattr(geom, "geoms", []) for p in _polygon_parts(g)]
+
+
+def printable(geom, min_feature: float, clip: Polygon | None = None):
     """Simplify a footprint and guarantee no part is thinner than `min_feature`.
 
     Drops sub-feature noise, dissolves a feature's own slivers/notches, and
     grows any everywhere-thin feature out to the minimum width. Returns a
     (Multi)Polygon or None. Each component is handled on its own so a thin
     outbuilding next to a fat one is thickened without bloating the fat one.
+
+    `clip` is the model outline in print mm, and it is applied **last**: the
+    widening above is exactly what pushes a feature past the model edge, so
+    trimming any earlier would let it grow straight back out. Nothing this
+    returns ever leaves the outline; a feature straddling it comes back cut
+    flush, or dropped if the cut leaves less than one printable feature.
     """
     if geom is None or geom.is_empty:
         return None
@@ -65,9 +78,14 @@ def printable(geom, min_feature: float):
             continue                                  # sub-feature noise
         if poly.buffer(-h).is_empty:                  # thinner than min everywhere
             poly = poly.buffer(h, join_style="mitre", mitre_limit=2.0)
-        for p in getattr(poly, "geoms", [poly]):
-            if not p.is_empty and p.area > 0:
-                out.append(p)
+        if clip is None:
+            out.extend(_polygon_parts(poly))
+            continue
+        # Cut flush with the model edge. A feature that only grazes the outline
+        # is left as an unprintable nub hanging off it, so hold what survives the
+        # cut to the same noise floor as the uncut footprint above.
+        out.extend(p for p in _polygon_parts(poly.intersection(clip))
+                   if p.area >= min_feature * min_feature)
     if not out:
         return None
     return out[0] if len(out) == 1 else MultiPolygon(out)
