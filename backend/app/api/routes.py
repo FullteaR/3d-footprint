@@ -10,7 +10,7 @@ from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
 from ..core.gpx import clip_track, expand_bbox, parse_bbox_param, parse_gpx
-from ..core.coloring import category_grid
+from ..core.coloring import category_grid, generalize
 from ..core.mesh import MeshParams, make_projection, terrain_solid
 from ..core.nameplate import nameplate_bodies
 from ..core.region import (
@@ -41,6 +41,7 @@ def generate(
     building_scale: float = Form(1.0),
     min_feature_mm: float = Form(0.8),
     landuse: bool = Form(False),
+    min_color_mm: float = Form(0.0),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
     building_color: str = Form("#b0b0b0"),
@@ -96,11 +97,31 @@ def generate(
             clip_mm = region.polygon_mm(proj)   # for terrain / buildings / bridges
 
         cat_grid = None
+        smooth_colors = False
         if landuse:
             # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells
             # PLATEAU doesn't classify; the rest stays the terrain colour.
             cat_grid = category_grid(grid)
-        bodies: list[Body] = terrain_solid(proj, cat_grid, naturalize=False, clip=clip_mm)
+            if cat_grid is not None and min_color_mm > 0:
+                # Colour detail is set in print mm, independently of the
+                # terrain's: one DEM cell is a fraction of a mm, far under what
+                # a multi-material printer resolves, so anything finer than
+                # `min_color_mm` is dissolved before the mesh is cut.
+                cell_mm = min(
+                    float(proj.x_of(grid.lons[1]) - proj.x_of(grid.lons[0])),
+                    float(proj.y_of(grid.lats[1]) - proj.y_of(grid.lats[0])),
+                )
+                if cell_mm > 0:
+                    cat_grid = generalize(cat_grid, min_color_mm / cell_mm)
+                    smooth_colors = True
+        # Generalised colours get the contour cut too: dissolving fine features
+        # is only half the job, the borders still have to leave the grid (cells
+        # cut along a marching-squares polyline, then straightened) or the
+        # colours read as a mosaic of squares. Painting as-is (the slider at 0)
+        # keeps the raw cell edges, detail and all.
+        bodies: list[Body] = terrain_solid(
+            proj, cat_grid, naturalize=smooth_colors, clip=clip_mm
+        )
         if include_buildings:
             # Bridges/elevated structures share the buildings toggle and colour
             # layer; both are massed into printable blocks (min_feature_mm sets

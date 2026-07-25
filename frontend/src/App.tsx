@@ -45,6 +45,32 @@ function NumField({ value, min, max, step, digits = 0, disabled, onCommit }: {
   );
 }
 
+// Padlock for the span/size/scale lock buttons (emoji render too unevenly).
+function LockIcon({ open }: { open: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+      {open ? (
+        <path d="M11 7V4.5a3 3 0 0 0-6 0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      ) : (
+        <path d="M5 7V4.8a3 3 0 0 1 6 0V7" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      )}
+      <rect x="3" y="7" width="10" height="6.5" rx="1.6" fill="currentColor" />
+    </svg>
+  );
+}
+
+// Nested contour rings with the track-vermilion summit dot.
+function BrandMark() {
+  return (
+    <svg className="brand-mark" viewBox="0 0 26 26" width="24" height="24" aria-hidden="true">
+      <path d="M13 2.8C6.7 2.6 2.2 6.9 2.6 13.2c.4 6 5 10.3 10.9 10 6-.3 10-4.8 9.9-10.4C23.2 7 19.2 3 13 2.8Z" fill="none" stroke="#2e5e8c" strokeWidth="1.3" />
+      <path d="M13.2 6.4c-4-.2-7 2.5-6.8 6.6.2 4 3.2 6.8 7 6.6 3.8-.2 6.3-3 6.2-6.7-.1-3.8-2.6-6.3-6.4-6.5Z" fill="none" stroke="#2f6b52" strokeWidth="1.3" />
+      <path d="M13 10c-2-.1-3.6 1.3-3.5 3.3.1 2 1.6 3.4 3.6 3.3 1.9-.1 3.2-1.5 3.1-3.4-.1-1.9-1.3-3.1-3.2-3.2Z" fill="none" stroke="#c2b280" strokeWidth="1.3" />
+      <circle cx="13.1" cy="13.3" r="1.7" fill="#f4552b" />
+    </svg>
+  );
+}
+
 // Flow: pick a GPX -> the map shows the track and a draggable model bbox ->
 // tune every option -> 「3Dモデルを作成する」 generates the GLB preview
 // (server-side, so track height etc. stay exact) -> download as 3MF/STL.
@@ -57,6 +83,7 @@ export function App() {
   const [baseThickness, setBaseThickness] = useState(3);
   const [gridMax, setGridMax] = useState(1000);
   const [landuse, setLanduse] = useState(false);
+  const [minColor, setMinColor] = useState(1);
   const [includeTrack, setIncludeTrack] = useState(true);
   const [trackWidth, setTrackWidth] = useState(1.2);
   const [trackHeight, setTrackHeight] = useState(1.5);
@@ -223,7 +250,7 @@ export function App() {
       disabled={disabled}
       onClick={() => lockTo(item)}
     >
-      {locked === item ? "🔒" : "🔓"}
+      <LockIcon open={locked !== item} />
     </button>
   );
 
@@ -236,6 +263,7 @@ export function App() {
       f.append("base_thickness_mm", String(baseThickness));
       f.append("grid_max", String(gridMax));
       f.append("landuse", String(landuse));
+      f.append("min_color_mm", String(minColor));
       f.append("include_track", String(includeTrack));
       f.append("track_width_mm", String(trackWidth));
       f.append("track_height_mm", String(trackHeight));
@@ -257,7 +285,7 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, shape, rotation]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, shape, rotation]
   );
 
   // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
@@ -331,8 +359,11 @@ export function App() {
   return (
     <main className="app">
       <header className="app-header">
-        <h1 className="app-title"><span className="logo">🗻</span>3d-footprint</h1>
-        <p className="app-subtitle">GPXの移動軌跡＋地形 → 3Dプリント用 3MF/STL</p>
+        <span className="brand">
+          <BrandMark />
+          <h1 className="app-title">3D-FOOTPRINT</h1>
+        </span>
+        <p className="app-subtitle">GPXの移動軌跡と地形から、3Dプリント用の立体地図をつくる</p>
         <span className={`health${health === "ok" ? " ok" : ""}`}>
           <span className="dot" />API {health === "ok" ? "接続中" : health}
         </span>
@@ -340,211 +371,224 @@ export function App() {
 
       <div className="layout">
         <div className="card panel">
-          <label
-            className={`dropzone${dragOver ? " drag" : ""}${file ? " has-file" : ""}`}
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={onDrop}
-          >
-            <input type="file" accept=".gpx" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-            {file ? (
+          <div className="panel-scroll">
+            <label
+              className={`dropzone${dragOver ? " drag" : ""}${file ? " has-file" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={onDrop}
+            >
+              <input type="file" accept=".gpx" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              {file ? (
+                <>
+                  <div className="file-name">{file.name}</div>
+                  <div className="sub">クリックまたはドロップで差し替え</div>
+                </>
+              ) : (
+                <>
+                  <div>GPXファイルをここにドロップ</div>
+                  <div className="sub">またはクリックして選択</div>
+                </>
+              )}
+            </label>
+
+            <h3 className="section-title">大きさ・縮尺</h3>
+            <div className="row">
+              {lockBtn("span", !bbox)}
+              <label>範囲（実距離）</label>
+              <span className="val">{extentText}</span>
+            </div>
+            <div className="row">
+              {lockBtn("size")}
+              <label>印刷サイズ（最大辺 mm）</label>
+              <NumField value={sizeMm} min={SIZE_MIN} max={SIZE_MAX} step={5} digits={1} disabled={locked === "size"} onCommit={commitSize} />
+            </div>
+            <div className="row">
+              {lockBtn("scale", !bbox)}
+              <label>縮尺　1:</label>
+              <NumField value={scaleDenom == null ? null : Math.round(scaleDenom)} min={100} max={10000000} step={1000} disabled={!bbox || locked === "scale"} onCommit={commitScale} />
+            </div>
+            <div className="row presets">
+              {[25000, 50000].map((d) => (
+                <button key={d} className="btn btn-ghost btn-xs" disabled={!bbox || locked === "scale"} onClick={() => commitScale(d)}>
+                  1:{d.toLocaleString()}
+                </button>
+              ))}
+            </div>
+            <p className="hint">
+              鍵を閉じた項目は固定されます。他の項目を動かすと、残りの項目が追従します。
+              範囲を固定すると地図の枠はリサイズ不可（移動・回転は可）になります。
+              縮尺を固定すると、枠のドラッグに印刷サイズが追従します。
+            </p>
+
+            <h3 className="section-title">モデル</h3>
+            <div className="row">
+              <label>垂直強調<span className="val">×{verticalScale}</span></label>
+              <input type="range" min={1} max={30} step={0.5} value={verticalScale} onChange={(e) => setVerticalScale(Number(e.target.value))} />
+            </div>
+            <div className="row">
+              <label>底面厚（mm）</label>
+              <input type="number" min={0} max={20} step={0.5} value={baseThickness} onChange={(e) => setBaseThickness(Number(e.target.value))} />
+            </div>
+            <div className="row">
+              <label>解像度（詳細度）</label>
+              <select value={gridMax} onChange={(e) => setGridMax(Number(e.target.value))}>
+                <option value={700}>標準（速い・粗い）</option>
+                <option value={1000}>高</option>
+                <option value={1400}>最高（細かい・重い）</option>
+              </select>
+            </div>
+            <p className="hint">
+              上げるほど地形が細かく（建物/橋に近づく）なりますが、生成とプレビューが重くなります。
+              色分けの細かさは下の「色の最小サイズ」で別に決まります。
+            </p>
+            <p className="hint">
+              出典表記（データ利用規約上の必須事項）: 底面に正式な出典（「出典: 国土地理院…を加工して作成」等、使用データに連動）を文字高さ約2.6mmで小さく凹刻印し、ダウンロードファイルにも同じ出典文を埋め込みます（3MF・GLB=メタデータ、STL=ヘッダ、ZIP=README）。
+            </p>
+
+            <h3 className="section-title">色・土地利用</h3>
+            <div className="row">
+              <label>土地利用で色分け</label>
+              <input className="toggle" type="checkbox" checked={landuse} onChange={(e) => setLanduse(e.target.checked)} />
+            </div>
+            {landuse && (
               <>
-                <div className="file-name">📍 {file.name}</div>
-                <div className="sub">クリックまたはドロップで差し替え</div>
-              </>
-            ) : (
-              <>
-                <div>GPXファイルをここにドロップ</div>
-                <div className="sub">またはクリックして選択</div>
+                <div className="legend">
+                  {LANDUSE_LEGEND.map(([name, c]) => (
+                    <span key={name}><i style={{ background: c }} />{name}</span>
+                  ))}
+                </div>
+                <p className="hint">
+                  PLATEAU（土地利用）を優先し、無い部分はJAXA土地被覆図（10m）で補完。どちらにも無い部分は「地形の色」になります（道路はPLATEAU域のみ）。
+                </p>
+                <div className="row">
+                  <label>色の最小サイズ<span className="val">{minColor ? `${minColor}mm` : "なし"}</span></label>
+                  <input type="range" min={0} max={4} step={0.5} value={minColor} onChange={(e) => setMinColor(Number(e.target.value))} />
+                </div>
+                <p className="hint">
+                  印刷実寸でこれより小さい色の斑点・細い筋（目安: 幅はこの2/3程度から）を消し、
+                  色の境界をなめらかな曲線にします。地形の凹凸の細かさは変わりません。
+                  0では元データそのまま（境界がセル単位のギザギザになり、細かい色面は印刷で潰れます）。
+                </p>
               </>
             )}
-          </label>
+            <div className="row">
+              <label>地形の色</label>
+              <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />
+            </div>
 
-          <h3 className="section-title">大きさ・縮尺</h3>
-          <div className="row">
-            {lockBtn("span", !bbox)}
-            <label>範囲（実距離）</label>
-            <span className="val">{extentText}</span>
-          </div>
-          <div className="row">
-            {lockBtn("size")}
-            <label>印刷サイズ（最大辺 mm）</label>
-            <NumField value={sizeMm} min={SIZE_MIN} max={SIZE_MAX} step={5} digits={1} disabled={locked === "size"} onCommit={commitSize} />
-          </div>
-          <div className="row">
-            {lockBtn("scale", !bbox)}
-            <label>縮尺　1:</label>
-            <NumField value={scaleDenom == null ? null : Math.round(scaleDenom)} min={100} max={10000000} step={1000} disabled={!bbox || locked === "scale"} onCommit={commitScale} />
-          </div>
-          <div className="row presets">
-            {[25000, 50000].map((d) => (
-              <button key={d} className="btn btn-ghost btn-xs" disabled={!bbox || locked === "scale"} onClick={() => commitScale(d)}>
-                1:{d.toLocaleString()}
-              </button>
-            ))}
-          </div>
-          <p className="hint">
-            🔒の項目は固定。他の項目を動かすと、残りの項目が追従します。
-            範囲を固定すると地図の枠はリサイズ不可（移動・回転は可）になります。
-            縮尺を固定すると、枠のドラッグに印刷サイズが追従します。
-          </p>
+            <h3 className="section-title">軌跡</h3>
+            <div className="row">
+              <label>軌跡を含める</label>
+              <input className="toggle" type="checkbox" checked={includeTrack} onChange={(e) => setIncludeTrack(e.target.checked)} />
+            </div>
+            <div className={`row${includeTrack ? "" : " dim"}`}>
+              <label>軌跡の幅（mm）</label>
+              <input type="number" min={0.4} max={10} step={0.1} value={trackWidth} disabled={!includeTrack} onChange={(e) => setTrackWidth(Number(e.target.value))} />
+            </div>
+            <div className={`row${includeTrack ? "" : " dim"}`}>
+              <label>軌跡の高さ（mm）</label>
+              <input type="number" min={0.2} max={10} step={0.1} value={trackHeight} disabled={!includeTrack} onChange={(e) => setTrackHeight(Number(e.target.value))} />
+            </div>
+            <div className={`row${includeTrack ? "" : " dim"}`}>
+              <label>軌跡の色</label>
+              <input type="color" value={trackColor} disabled={!includeTrack} onChange={(e) => setTrackColor(e.target.value)} />
+            </div>
 
-          <h3 className="section-title">モデル</h3>
-          <div className="row">
-            <label>垂直強調<span className="val">×{verticalScale}</span></label>
-            <input type="range" min={1} max={30} step={0.5} value={verticalScale} onChange={(e) => setVerticalScale(Number(e.target.value))} />
-          </div>
-          <div className="row">
-            <label>底面厚（mm）</label>
-            <input type="number" min={0} max={20} step={0.5} value={baseThickness} onChange={(e) => setBaseThickness(Number(e.target.value))} />
-          </div>
-          <div className="row">
-            <label>解像度（詳細度）</label>
-            <select value={gridMax} onChange={(e) => setGridMax(Number(e.target.value))}>
-              <option value={700}>標準（速い・粗い）</option>
-              <option value={1000}>高</option>
-              <option value={1400}>最高（細かい・重い）</option>
-            </select>
-          </div>
-          <p className="hint">
-            上げるほど色分け・地形が細かく（建物/橋に近づく）なりますが、生成とプレビューが重くなります。
-          </p>
-          <p className="hint">
-            出典表記（データ利用規約上の必須事項）: 底面に正式な出典（「出典: 国土地理院…を加工して作成」等、使用データに連動）を文字高さ約2.6mmで小さく凹刻印し、ダウンロードファイルにも同じ出典文を埋め込みます（3MF・GLB=メタデータ、STL=ヘッダ、ZIP=README）。
-          </p>
-
-          <h3 className="section-title">色・土地利用</h3>
-          <div className="row">
-            <label>土地利用で色分け</label>
-            <input className="toggle" type="checkbox" checked={landuse} onChange={(e) => setLanduse(e.target.checked)} />
-          </div>
-          {landuse && (
-            <>
-              <div className="legend">
-                {LANDUSE_LEGEND.map(([name, c]) => (
-                  <span key={name}><i style={{ background: c }} />{name}</span>
-                ))}
-              </div>
-              <p className="hint">
-                PLATEAU（土地利用）を優先し、無い部分はJAXA土地被覆図（10m）で補完。どちらにも無い部分は「地形の色」になります（道路はPLATEAU域のみ）。
-              </p>
-            </>
-          )}
-          <div className="row">
-            <label>地形の色</label>
-            <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />
-          </div>
-
-          <h3 className="section-title">軌跡</h3>
-          <div className="row">
-            <label>軌跡を含める</label>
-            <input className="toggle" type="checkbox" checked={includeTrack} onChange={(e) => setIncludeTrack(e.target.checked)} />
-          </div>
-          <div className={`row${includeTrack ? "" : " dim"}`}>
-            <label>軌跡の幅（mm）</label>
-            <input type="number" min={0.4} max={10} step={0.1} value={trackWidth} disabled={!includeTrack} onChange={(e) => setTrackWidth(Number(e.target.value))} />
-          </div>
-          <div className={`row${includeTrack ? "" : " dim"}`}>
-            <label>軌跡の高さ（mm）</label>
-            <input type="number" min={0.2} max={10} step={0.1} value={trackHeight} disabled={!includeTrack} onChange={(e) => setTrackHeight(Number(e.target.value))} />
-          </div>
-          <div className={`row${includeTrack ? "" : " dim"}`}>
-            <label>軌跡の色</label>
-            <input type="color" value={trackColor} disabled={!includeTrack} onChange={(e) => setTrackColor(e.target.value)} />
-          </div>
-
-          <h3 className="section-title">建物・橋</h3>
-          <div className="row">
-            <label>建物・橋 (PLATEAU LOD2)</label>
-            <input className="toggle" type="checkbox" checked={includeBuildings} onChange={(e) => setIncludeBuildings(e.target.checked)} />
-          </div>
-          {includeBuildings && (
-            <>
-              <p className="hint">
-                PLATEAU整備済みの都市のみ（LOD2/LOD1）。印刷用に簡略化（建物＝輪郭ブロック化／橋・高架＝デッキ＋脚で地面に接続）。初回はDLに時間がかかります。
-              </p>
-              <div className="row">
-                <label>高さ強調<span className="val">×{buildingScale}</span></label>
-                <input type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
-              </div>
-              <div className="row">
-                <label>最小幅<span className="val">{minFeature}mm</span></label>
-                <input type="range" min={0.4} max={2} step={0.1} value={minFeature} onChange={(e) => setMinFeature(Number(e.target.value))} />
-              </div>
-              <p className="hint">
-                ノズル径以下は潰れるため、これより細い建物・橋脚は最小幅まで太らせます（目安: ノズル0.4mmなら0.8）。
-              </p>
-              <div className="row">
-                <label>建物・橋の色</label>
-                <input type="color" value={buildingColor} onChange={(e) => setBuildingColor(e.target.value)} />
-              </div>
-            </>
-          )}
-
-          <h3 className="section-title">銘板</h3>
-          <div className="row">
-            <label>銘板を付ける</label>
-            <input className="toggle" type="checkbox" checked={includePlate} onChange={(e) => setIncludePlate(e.target.checked)} />
-          </div>
-          {includePlate && (
-            <>
-              <label className={`dropzone slim${plateSvg ? " has-file" : ""}`}>
-                <input type="file" accept=".svg,image/svg+xml" onChange={(e) => setPlateSvg(e.target.files?.[0] ?? null)} />
-                {plateSvg ? (
-                  <div className="file-name">🏷️ {plateSvg.name}</div>
-                ) : (
-                  <div>銘板デザインのSVGを選択</div>
-                )}
-                <div className="sub">板の面（約{Math.round(plateWmm)}×{plateDepth}mm）に自動で収めます</div>
-              </label>
-              {plateUrl && (
-                <div className="plate-preview" style={{ aspectRatio: `${plateWmm} / ${plateDepth}`, background: terrainColor }}>
-                  <img src={plateUrl} alt="銘板プレビュー" />
+            <h3 className="section-title">建物・橋</h3>
+            <div className="row">
+              <label>建物・橋 (PLATEAU LOD2)</label>
+              <input className="toggle" type="checkbox" checked={includeBuildings} onChange={(e) => setIncludeBuildings(e.target.checked)} />
+            </div>
+            {includeBuildings && (
+              <>
+                <p className="hint">
+                  PLATEAU整備済みの都市のみ（LOD2/LOD1）。印刷用に簡略化（建物＝輪郭ブロック化／橋・高架＝デッキ＋脚で地面に接続）。初回はDLに時間がかかります。
+                </p>
+                <div className="row">
+                  <label>高さ強調<span className="val">×{buildingScale}</span></label>
+                  <input type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
                 </div>
-              )}
-              <p className="hint">
-                モデル手前に張り出す板に、SVGの塗り・線がそのまま凸になります。
-                文字はデザインツールで<b>アウトライン化</b>（パスに変換）してください（&lt;text&gt;要素は不可）。
-                実寸0.4mm未満の細線は印刷で潰れます。縮尺や日付は上の縮尺表示を見てSVGに直接入れてください。
-              </p>
-              <div className="row">
-                <label>板の奥行き（mm）</label>
-                <input type="number" min={4} max={40} step={1} value={plateDepth} onChange={(e) => setPlateDepth(Number(e.target.value))} />
-              </div>
-              <div className="row">
-                <label>凸の高さ（mm）</label>
-                <input type="number" min={0.2} max={2} step={0.1} value={plateRelief} onChange={(e) => setPlateRelief(Number(e.target.value))} />
-              </div>
-              <div className="row">
-                <label>凸部の色</label>
-                <input type="color" value={labelColor} onChange={(e) => setLabelColor(e.target.value)} />
-              </div>
-            </>
-          )}
+                <div className="row">
+                  <label>最小幅<span className="val">{minFeature}mm</span></label>
+                  <input type="range" min={0.4} max={2} step={0.1} value={minFeature} onChange={(e) => setMinFeature(Number(e.target.value))} />
+                </div>
+                <p className="hint">
+                  ノズル径以下は潰れるため、これより細い建物・橋脚は最小幅まで太らせます（目安: ノズル0.4mmなら0.8）。
+                </p>
+                <div className="row">
+                  <label>建物・橋の色</label>
+                  <input type="color" value={buildingColor} onChange={(e) => setBuildingColor(e.target.value)} />
+                </div>
+              </>
+            )}
 
-          <hr className="divider" />
+            <h3 className="section-title">銘板</h3>
+            <div className="row">
+              <label>銘板を付ける</label>
+              <input className="toggle" type="checkbox" checked={includePlate} onChange={(e) => setIncludePlate(e.target.checked)} />
+            </div>
+            {includePlate && (
+              <>
+                <label className={`dropzone slim${plateSvg ? " has-file" : ""}`}>
+                  <input type="file" accept=".svg,image/svg+xml" onChange={(e) => setPlateSvg(e.target.files?.[0] ?? null)} />
+                  {plateSvg ? (
+                    <div className="file-name">{plateSvg.name}</div>
+                  ) : (
+                    <div>銘板デザインのSVGを選択</div>
+                  )}
+                  <div className="sub">板の面（約{Math.round(plateWmm)}×{plateDepth}mm）に自動で収めます</div>
+                </label>
+                {plateUrl && (
+                  <div className="plate-preview" style={{ aspectRatio: `${plateWmm} / ${plateDepth}`, background: terrainColor }}>
+                    <img src={plateUrl} alt="銘板プレビュー" />
+                  </div>
+                )}
+                <p className="hint">
+                  モデル手前に張り出す板に、SVGの塗り・線がそのまま凸になります。
+                  文字はデザインツールで<b>アウトライン化</b>（パスに変換）してください（&lt;text&gt;要素は不可）。
+                  実寸0.4mm未満の細線は印刷で潰れます。縮尺や日付は上の縮尺表示を見てSVGに直接入れてください。
+                </p>
+                <div className="row">
+                  <label>板の奥行き（mm）</label>
+                  <input type="number" min={4} max={40} step={1} value={plateDepth} onChange={(e) => setPlateDepth(Number(e.target.value))} />
+                </div>
+                <div className="row">
+                  <label>凸の高さ（mm）</label>
+                  <input type="number" min={0.2} max={2} step={0.1} value={plateRelief} onChange={(e) => setPlateRelief(Number(e.target.value))} />
+                </div>
+                <div className="row">
+                  <label>凸部の色</label>
+                  <input type="color" value={labelColor} onChange={(e) => setLabelColor(e.target.value)} />
+                </div>
+              </>
+            )}
 
-          <button className="btn btn-primary btn-block" onClick={createModel} disabled={busy || !file}>
-            {busy && <span className="spinner" />}
-            3Dモデルを作成する
-          </button>
-
-          <div className="row" style={{ marginTop: 6 }}>
-            <label>フォーマット</label>
-            <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
-              <option value="3mf">3MF（多色・単一ファイル）</option>
-              <option value="stl_multi">STL（多色・色ごと分割ZIP）</option>
-              <option value="stl">STL（単色）</option>
-            </select>
           </div>
-          <button className="btn btn-secondary btn-block" onClick={download} disabled={busy || !file}>
-            生成してダウンロード
-          </button>
-          {status && <p className={`status${status.startsWith("エラー") ? " error" : ""}`}>{status}</p>}
+
+          <div className="panel-actions">
+            <button className="btn btn-primary btn-block" onClick={createModel} disabled={busy || !file}>
+              {busy && <span className="spinner" />}
+              3Dモデルを作成する
+            </button>
+
+            <div className="row" style={{ marginTop: 6 }}>
+              <label>フォーマット</label>
+              <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
+                <option value="3mf">3MF（多色・単一ファイル）</option>
+                <option value="stl_multi">STL（多色・色ごと分割ZIP）</option>
+                <option value="stl">STL（単色）</option>
+              </select>
+            </div>
+            <button className="btn btn-secondary btn-block" onClick={download} disabled={busy || !file}>
+              生成してダウンロード
+            </button>
+            {status && <p className={`status${status.startsWith("エラー") ? " error" : ""}`}>{status}</p>}
+          </div>
         </div>
 
         <div className="stack">
-          <div className="card">
+          <div className="card map-card">
             <div className="card-head">
               <strong>モデル化する範囲</strong>
               <select value={shape} onChange={(e) => onShapeChange(e.target.value as Shape)}>
@@ -582,7 +626,7 @@ export function App() {
               </button>
             </div>
             <div className="card-body map-box">
-              {!file && <div className="overlay-hint">GPXを選択すると地図に軌跡と範囲を表示</div>}
+              {!file && <div className="overlay-hint"><span>GPXを選択すると地図に軌跡と範囲を表示</span></div>}
               <MapPicker
                 points={trackPts} bbox={bbox} shape={shape} rotation={rotation}
                 resizable={locked !== "span"}
@@ -591,13 +635,13 @@ export function App() {
             </div>
           </div>
 
-          <div className="card">
+          <div className="card preview-card">
             <div className="card-head">
               <strong>3Dプレビュー</strong>
               <span>ドラッグで回転・ホイールで拡大</span>
             </div>
             <div className="card-body preview-box">
-              {!glb && <div className="overlay-hint">「3Dモデルを作成する」を押すとここにプレビュー</div>}
+              {!glb && <div className="overlay-hint"><span>「3Dモデルを作成する」を押すとここにプレビュー</span></div>}
               {busy && <div className="busy-badge"><span className="spinner" />生成中…</div>}
               <Preview glb={glb} />
             </div>

@@ -12,6 +12,10 @@ to the JAXA HRLULC fallback (jaxa.py) — strictly gap-fill, painted just as
 literally: it never overrides a PLATEAU-classified cell. Cells neither source
 classifies keep the "terrain" label, i.e. the plain user-picked terrain
 colour. No smoothing, no sea stamping, no DEM-based corrections anywhere.
+
+The one optional post-process is `generalize`, and it is about the printer, not
+the data: it dissolves colour features finer than a requested print size, so
+what is left is big enough to actually print.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import numpy as np
 import requests
 from lxml import etree
 from PIL import Image, ImageDraw
+from scipy.ndimage import distance_transform_edt, gaussian_filter, label as ndlabel
 
 from ..config import DATA_DIR
 from . import jaxa
@@ -262,6 +267,65 @@ def _plateau_index_grid(grid: ElevationGrid) -> np.ndarray | None:
     memo.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(memo, classes=idx)
     return idx
+
+
+def generalize(cats: np.ndarray, min_size_cells: float) -> np.ndarray:
+    """Drop colour features finer than `min_size_cells`, keeping borders smooth.
+
+    The label grid is as fine as the DEM (a cell is a fraction of a mm on the
+    print), so raw land use paints speckles and hairline slivers far below what
+    a multi-material printer can lay down. Each category's indicator is blurred
+    with a Gaussian of half the wanted size and the winner is taken per cell —
+    the cartographer's generalisation, not a downsample: a patch smaller than
+    the kernel loses the vote and dissolves into its surroundings, while what
+    survives keeps a border that runs where the data says, only smoother.
+
+    Blurring the labels (rather than voting them into blocks) is what keeps the
+    result off the grid: level sets of a smooth field are curves, so borders
+    round off at roughly `min_size_cells`/2 instead of stepping along cell
+    edges, and a genuinely straight border (reclaimed coast, urban parcel)
+    stays straight because blurring a straight edge does not move it.
+
+    Ties go to a classified category over the plain terrain colour (the
+    land-use colour is the informative half); remaining ties follow palette
+    order, so the result is deterministic. `min_size_cells` <= 1 is a no-op —
+    nothing on the grid is finer than one cell.
+    """
+    if min_size_cells <= 1:
+        return cats
+    order = [c for c in _PALETTE if c != UNCLASSIFIED] + [UNCLASSIFIED]
+    labels = [c for c in order if (cats == c).any()]
+    if len(labels) < 2:
+        return cats
+    # An isolated patch survives the vote at about 2 sigma across, a stripe at
+    # about 1.35 sigma wide, so sigma = half the wanted size sets the floor.
+    field = np.stack([
+        gaussian_filter((cats == c).astype(np.float32), min_size_cells / 2.0,
+                        mode="nearest")
+        for c in labels
+    ])
+    won = np.argmax(field, axis=0)
+
+    # Where three categories meet, the winner can flip for a cell or two before
+    # the third field fades — a speck the vote alone won't catch. Collect
+    # everything under a quarter of the wanted area (well below a legitimate
+    # feature) and hand each of those cells the label of the nearest cell that
+    # is not itself a speck: a speck always dissolves into a region it actually
+    # touches, so the sweep can't just relabel it or leave a new island behind.
+    # Diagonal-only contact counts as a separate patch, so specks hanging off a
+    # corner go too — those are the pinch points that make a solid non-manifold.
+    min_area = max(2, int((min_size_cells / 2.0) ** 2))
+    speck = np.zeros(won.shape, bool)
+    for k in range(len(labels)):
+        patches, n = ndlabel(won == k)
+        if n:
+            small = np.flatnonzero(np.bincount(patches.ravel())[1:] < min_area) + 1
+            if small.size:
+                speck |= np.isin(patches, small)
+    if speck.any() and not speck.all():
+        near = distance_transform_edt(speck, return_indices=True)[1]
+        won[speck] = won[near[0][speck], near[1][speck]]
+    return np.asarray(labels, dtype=cats.dtype)[won]
 
 
 def category_grid(grid: ElevationGrid) -> np.ndarray | None:
