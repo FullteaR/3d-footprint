@@ -8,7 +8,9 @@ import "./ui.css";
 
 // 範囲 (real-world span) / 印刷サイズ / 縮尺 are one equation apart
 // (span_m = size_mm/1000 × denom): the locked one is frozen, editing either
-// of the others makes the remaining one follow.
+// of the others makes the remaining one follow. Nothing has to be locked
+// (the default) — then the map frame is the master and the two numbers just
+// describe it, trading off against each other when typed into.
 type Lock = "span" | "size" | "scale";
 
 // Number input that commits on blur / Enter — committed values can move the
@@ -94,6 +96,24 @@ const LANDUSE_LEGEND: [string, string][] = [
   ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
 ];
 
+// Round map scales — the 1/1.5/2/2.5/3/4/5/7.5 ladder per decade, over the
+// range the 縮尺 field accepts.
+const SCALE_LADDER = [2, 3, 4, 5, 6].flatMap((k) =>
+  [1, 1.5, 2, 2.5, 3, 4, 5, 7.5].map((m) => Math.round(m * 10 ** k)),
+).filter((d) => d >= 100 && d <= 10000000);
+
+// The three round scales nearest the current one (ratio-wise — scales are
+// multiplicative), so the suggestions stay useful at any zoom.
+function niceScales(denom: number): number[] {
+  let best = 0;
+  for (let i = 1; i < SCALE_LADDER.length; i++) {
+    if (Math.abs(Math.log(SCALE_LADDER[i] / denom)) <
+        Math.abs(Math.log(SCALE_LADDER[best] / denom))) best = i;
+  }
+  const from = Math.min(Math.max(best - 1, 0), SCALE_LADDER.length - 3);
+  return SCALE_LADDER.slice(from, from + 3);
+}
+
 // Cap a polyline so huge 1 Hz logs don't bog the map down.
 function thin(pts: [number, number][]): [number, number][] {
   const stride = Math.max(1, Math.ceil(pts.length / 3000));
@@ -164,7 +184,7 @@ export function App() {
   const [track, setTrack] = useState<{ pts: [number, number][]; times: number[] | null }>({ pts: [], times: null });
   const [timeSpan, setTimeSpan] = useState<[number, number] | null>(null);
   const [range, setRange] = useState<[number, number] | null>(null);
-  const [locked, setLocked] = useState<Lock>("size");
+  const [locked, setLocked] = useState<Lock | null>(null);
   const [lockedDenom, setLockedDenom] = useState<number | null>(null);
   // For the file-parse effect (which must not re-run on shape/rotation change)
   // and the Leaflet callbacks (created once).
@@ -298,7 +318,10 @@ export function App() {
     locked === "scale" && lockedDenom ? lockedDenom
     : spanM ? (spanM * 1000) / sizeMm : null;
 
+  // The padlocks are toggles: clicking the closed one releases it, leaving
+  // nothing locked.
   function lockTo(item: Lock) {
+    if (locked === item) { setLocked(null); return; }
     if (item === "scale") {
       if (scaleDenom == null) return;
       setLockedDenom(scaleDenom);
@@ -321,7 +344,9 @@ export function App() {
     if (locked === "size") {
       const k = ((d * sizeMm) / 1000) / spanMeters(b, shape);
       setBbox(normalizeBbox(scaleBbox(b, k), shape));
-    } else if (locked === "span") {
+    } else {
+      // 範囲 locked, or nothing locked: the frame the user drew on the map
+      // stays put and the print size takes the change.
       setSizeMm(Math.min(SIZE_MAX, Math.max(SIZE_MIN, (spanMeters(b, shape) * 1000) / d)));
     }
   }
@@ -344,7 +369,7 @@ export function App() {
   const lockBtn = (item: Lock, disabled = false) => (
     <button
       className={`lock-btn${locked === item ? " on" : ""}`}
-      title={locked === item ? "固定中" : "この項目を固定する"}
+      title={locked === item ? "固定中（クリックで解除）" : "この項目を固定する"}
       disabled={disabled}
       onClick={() => lockTo(item)}
     >
@@ -537,13 +562,15 @@ export function App() {
               <label>縮尺　1:</label>
               <NumField value={scaleDenom == null ? null : Math.round(scaleDenom)} min={100} max={10000000} step={1000} disabled={!bbox || locked === "scale"} onCommit={commitScale} />
             </div>
-            <div className="row presets">
-              {[25000, 50000].map((d) => (
-                <button key={d} className="btn btn-ghost btn-xs" disabled={!bbox || locked === "scale"} onClick={() => commitScale(d)}>
-                  1:{d.toLocaleString()}
-                </button>
-              ))}
-            </div>
+            {scaleDenom != null && (
+              <div className="row presets">
+                {niceScales(scaleDenom).map((d) => (
+                  <button key={d} className="btn btn-ghost btn-xs scale-preset" disabled={locked === "scale"} onClick={() => commitScale(d)}>
+                    1:{d.toLocaleString()}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <h3 className="section-title">モデル</h3>
             <div className="row">

@@ -311,6 +311,7 @@ input[type="number"]:disabled, select:disabled { opacity: 0.45; }
 
 .row.presets {
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 6px;
   padding-top: 0;
 }
