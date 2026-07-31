@@ -628,7 +628,6 @@ input[type="color"]:disabled { opacity: 0.45; }
   color: var(--text-3);
 }
 .credits a { color: var(--text-2); }
-.credits-note { display: block; }
 
 /* ---------- narrow screens: plain stacked flow ---------- */
 @media (max-width: 960px) {

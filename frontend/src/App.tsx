@@ -509,10 +509,6 @@ export function App() {
                         全体に戻す
                       </button>
                     </div>
-                    <p className="hint">
-                      選択した時間帯だけを軌跡として造形します（地図では範囲外が灰色になります）。
-                      モデル化する範囲（枠）は自動では変わりません。選択部分に合わせるには地図の「軌跡に合わせる」を押してください。
-                    </p>
                   </>
                 ) : (
                   <p className="hint">
@@ -545,11 +541,6 @@ export function App() {
                 </button>
               ))}
             </div>
-            <p className="hint">
-              鍵を閉じた項目は固定されます。他の項目を動かすと、残りの項目が追従します。
-              範囲を固定すると地図の枠はリサイズ不可（移動・回転は可）になります。
-              縮尺を固定すると、枠のドラッグに印刷サイズが追従します。
-            </p>
 
             <h3 className="section-title">モデル</h3>
             <div className="row">
@@ -568,13 +559,6 @@ export function App() {
                 <option value={1400}>最高（細かい・重い）</option>
               </select>
             </div>
-            <p className="hint">
-              上げるほど地形が細かく（建物/橋に近づく）なりますが、生成とプレビューが重くなります。
-              色分けの細かさは下の「色の最小サイズ」で別に決まります。
-            </p>
-            <p className="hint">
-              出典表記（データ利用規約上の必須事項）: 底面に正式な出典（「出典: 国土地理院…を加工して作成」等、使用データに連動）を文字高さ約2.6mmで小さく凹刻印し、ダウンロードファイルにも同じ出典文を埋め込みます（3MF・GLB=メタデータ、STL=ヘッダ、ZIP=README）。
-            </p>
 
             <h3 className="section-title">色・土地利用</h3>
             <div className="legend">
@@ -778,7 +762,6 @@ export function App() {
         <a href="https://www.mlit.go.jp/plateau/" target="_blank" rel="noreferrer">国土交通省 Project PLATEAU</a>・
         <a href="https://www.eorc.jaxa.jp/ALOS/jp/dataset/lulc_j.htm" target="_blank" rel="noreferrer">JAXA 高解像度土地利用土地被覆図</a>・
         地図表示 © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors
-        <span className="credits-note">生成した模型・データを頒布する際も出典明記が必要です（詳細はREADME）</span>
       </footer>
     </main>
   );
