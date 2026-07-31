@@ -127,7 +127,6 @@ export function App() {
   const [verticalScale, setVerticalScale] = useState(1);
   const [baseThickness, setBaseThickness] = useState(3);
   const [gridMax, setGridMax] = useState(1000);
-  const [landuse, setLanduse] = useState(false);
   const [minColor, setMinColor] = useState(1);
   const [includeTrack, setIncludeTrack] = useState(true);
   const [trackWidth, setTrackWidth] = useState(1.2);
@@ -352,7 +351,6 @@ export function App() {
       f.append("vertical_scale", String(verticalScale));
       f.append("base_thickness_mm", String(baseThickness));
       f.append("grid_max", String(gridMax));
-      f.append("landuse", String(landuse));
       f.append("min_color_mm", String(minColor));
       f.append("include_track", String(includeTrack));
       f.append("track_width_mm", String(trackWidth));
@@ -376,7 +374,7 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, timeRangeParam, shape, rotation]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, timeRangeParam, shape, rotation]
   );
 
   // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
@@ -579,31 +577,24 @@ export function App() {
             </p>
 
             <h3 className="section-title">色・土地利用</h3>
-            <div className="row">
-              <label>土地利用で色分け</label>
-              <input className="toggle" type="checkbox" checked={landuse} onChange={(e) => setLanduse(e.target.checked)} />
+            <div className="legend">
+              {LANDUSE_LEGEND.map(([name, c]) => (
+                <span key={name}><i style={{ background: c }} />{name}</span>
+              ))}
             </div>
-            {landuse && (
-              <>
-                <div className="legend">
-                  {LANDUSE_LEGEND.map(([name, c]) => (
-                    <span key={name}><i style={{ background: c }} />{name}</span>
-                  ))}
-                </div>
-                <p className="hint">
-                  PLATEAU（土地利用）を優先し、無い部分はJAXA土地被覆図（10m）で補完。どちらにも無い部分は「地形の色」になります（道路はPLATEAU域のみ）。
-                </p>
-                <div className="row">
-                  <label>色の最小サイズ<span className="val">{minColor ? `${minColor}mm` : "なし"}</span></label>
-                  <input type="range" min={0} max={4} step={0.5} value={minColor} onChange={(e) => setMinColor(Number(e.target.value))} />
-                </div>
-                <p className="hint">
-                  印刷実寸でこれより小さい色の斑点・細い筋（目安: 幅はこの2/3程度から）を消し、
-                  色の境界をなめらかな曲線にします。地形の凹凸の細かさは変わりません。
-                  0では元データそのまま（境界がセル単位のギザギザになり、細かい色面は印刷で潰れます）。
-                </p>
-              </>
-            )}
+            <p className="hint">
+              土地利用で常に色分けします。PLATEAU（土地利用）を優先し、無い部分はJAXA土地被覆図（10m）で補完。
+              どちらにも無い部分は「地形の色」になります（道路はPLATEAU域のみ）。
+            </p>
+            <div className="row">
+              <label>色の最小サイズ<span className="val">{minColor ? `${minColor}mm` : "なし"}</span></label>
+              <input type="range" min={0} max={4} step={0.5} value={minColor} onChange={(e) => setMinColor(Number(e.target.value))} />
+            </div>
+            <p className="hint">
+              印刷実寸でこれより小さい色の斑点・細い筋（目安: 幅はこの2/3程度から）を消し、
+              色の境界をなめらかな曲線にします。地形の凹凸の細かさは変わりません。
+              0では元データそのまま（境界がセル単位のギザギザになり、細かい色面は印刷で潰れます）。
+            </p>
             <div className="row">
               <label>地形の色</label>
               <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />

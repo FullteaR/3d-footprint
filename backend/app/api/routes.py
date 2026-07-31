@@ -43,7 +43,6 @@ def generate(
     include_buildings: bool = Form(False),
     building_scale: float = Form(1.0),
     min_feature_mm: float = Form(0.8),
-    landuse: bool = Form(False),
     min_color_mm: float = Form(0.0),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
@@ -61,6 +60,9 @@ def generate(
     fmt: str = Form("stl"),
 ) -> Response:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.
+
+    Land-use colouring is always applied where data covers the area; only its
+    printed detail is tunable (`min_color_mm`, 0 = paint the raw cells).
 
     `time_range` ("start,end" in epoch seconds) trims the GPX to one leg of the
     outing before anything else: the automatic extent follows the trimmed track.
@@ -105,24 +107,25 @@ def generate(
             clip_ll = region.polygon_lonlat()   # for the track (lon/lat)
             clip_mm = region.polygon_mm(proj)   # for terrain / buildings / bridges
 
-        cat_grid = None
+        # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells PLATEAU
+        # doesn't classify; the rest stays the terrain colour. None when neither
+        # source covers the area — then the model is plain terrain-coloured and
+        # the credit must not name land-use sources it never used.
         smooth_colors = False
-        if landuse:
-            # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells
-            # PLATEAU doesn't classify; the rest stays the terrain colour.
-            cat_grid = category_grid(grid)
-            if cat_grid is not None and min_color_mm > 0:
-                # Colour detail is set in print mm, independently of the
-                # terrain's: one DEM cell is a fraction of a mm, far under what
-                # a multi-material printer resolves, so anything finer than
-                # `min_color_mm` is dissolved before the mesh is cut.
-                cell_mm = min(
-                    float(proj.x_of(grid.lons[1]) - proj.x_of(grid.lons[0])),
-                    float(proj.y_of(grid.lats[1]) - proj.y_of(grid.lats[0])),
-                )
-                if cell_mm > 0:
-                    cat_grid = generalize(cat_grid, min_color_mm / cell_mm)
-                    smooth_colors = True
+        cat_grid = category_grid(grid)
+        landuse = cat_grid is not None
+        if landuse and min_color_mm > 0:
+            # Colour detail is set in print mm, independently of the terrain's:
+            # one DEM cell is a fraction of a mm, far under what a multi-material
+            # printer resolves, so anything finer than `min_color_mm` is
+            # dissolved before the mesh is cut.
+            cell_mm = min(
+                float(proj.x_of(grid.lons[1]) - proj.x_of(grid.lons[0])),
+                float(proj.y_of(grid.lats[1]) - proj.y_of(grid.lats[0])),
+            )
+            if cell_mm > 0:
+                cat_grid = generalize(cat_grid, min_color_mm / cell_mm)
+                smooth_colors = True
         # Generalised colours get the contour cut too: dissolving fine features
         # is only half the job, the borders still have to leave the grid (cells
         # cut along a marching-squares polyline, then straightened) or the
