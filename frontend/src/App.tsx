@@ -84,6 +84,16 @@ const durationText = (sec: number) => {
   return m >= 60 ? `${Math.floor(m / 60)}時間${pad2(m % 60)}分` : `${m}分`;
 };
 
+// Unclassified ground — what the land-use colours sit in, and the nameplate
+// slab (mirrors terrain_color's backend default; no longer user-editable).
+const TERRAIN_COLOR = "#c2b280";
+
+// PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
+const LANDUSE_LEGEND: [string, string][] = [
+  ["水面", "#4a80c0"], ["森林・緑地", "#3f7d3a"], ["農地", "#c9d17a"],
+  ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
+];
+
 // Cap a polyline so huge 1 Hz logs don't bog the map down.
 function thin(pts: [number, number][]): [number, number][] {
   const stride = Math.max(1, Math.ceil(pts.length / 3000));
@@ -140,7 +150,6 @@ export function App() {
   const [plateDepth, setPlateDepth] = useState(16);
   const [plateRelief, setPlateRelief] = useState(0.6);
   const [labelColor, setLabelColor] = useState("#333333");
-  const [terrainColor, setTerrainColor] = useState("#c2b280");
   const [trackColor, setTrackColor] = useState("#dc4628");
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
   const [fmt, setFmt] = useState("3mf");
@@ -358,7 +367,7 @@ export function App() {
       f.append("include_buildings", String(includeBuildings));
       f.append("building_scale", String(buildingScale));
       f.append("min_feature_mm", String(minFeature));
-      f.append("terrain_color", terrainColor);
+      f.append("terrain_color", TERRAIN_COLOR);
       f.append("track_color", trackColor);
       f.append("building_color", buildingColor);
       if (includePlate && plateSvg) {
@@ -374,14 +383,8 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, timeRangeParam, shape, rotation]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, timeRangeParam, shape, rotation]
   );
-
-  // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
-  const LANDUSE_LEGEND: [string, string][] = [
-    ["水面", "#4a80c0"], ["森林・緑地", "#3f7d3a"], ["農地", "#c9d17a"],
-    ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
-  ];
 
   // Minimum span + shape aspect ratio + the lock are enforced centrally so
   // every source (drag, shape switch, fit-to-track) yields a valid bbox.
@@ -561,15 +564,6 @@ export function App() {
             </div>
 
             <h3 className="section-title">色・土地利用</h3>
-            <div className="legend">
-              {LANDUSE_LEGEND.map(([name, c]) => (
-                <span key={name}><i style={{ background: c }} />{name}</span>
-              ))}
-            </div>
-            <p className="hint">
-              土地利用で常に色分けします。PLATEAU（土地利用）を優先し、無い部分はJAXA土地被覆図（10m）で補完。
-              どちらにも無い部分は「地形の色」になります（道路はPLATEAU域のみ）。
-            </p>
             <div className="row">
               <label>色の最小サイズ<span className="val">{minColor ? `${minColor}mm` : "なし"}</span></label>
               <input type="range" min={0} max={4} step={0.5} value={minColor} onChange={(e) => setMinColor(Number(e.target.value))} />
@@ -579,10 +573,6 @@ export function App() {
               色の境界をなめらかな曲線にします。地形の凹凸の細かさは変わりません。
               0では元データそのまま（境界がセル単位のギザギザになり、細かい色面は印刷で潰れます）。
             </p>
-            <div className="row">
-              <label>地形の色</label>
-              <input type="color" value={terrainColor} onChange={(e) => setTerrainColor(e.target.value)} />
-            </div>
 
             <h3 className="section-title">軌跡</h3>
             <div className="row">
@@ -647,7 +637,7 @@ export function App() {
                   <div className="sub">板の面（約{Math.round(plateWmm)}×{plateDepth}mm）に自動で収めます</div>
                 </label>
                 {plateUrl && (
-                  <div className="plate-preview" style={{ aspectRatio: `${plateWmm} / ${plateDepth}`, background: terrainColor }}>
+                  <div className="plate-preview" style={{ aspectRatio: `${plateWmm} / ${plateDepth}`, background: TERRAIN_COLOR }}>
                     <img src={plateUrl} alt="銘板プレビュー" />
                   </div>
                 )}
@@ -750,6 +740,13 @@ export function App() {
             <div className="card-body preview-box">
               {!glb && <div className="overlay-hint"><span>「3Dモデルを作成する」を押すとここにプレビュー</span></div>}
               {busy && <div className="busy-badge"><span className="spinner" />生成中…</div>}
+              {glb && (
+                <div className="preview-legend">
+                  {LANDUSE_LEGEND.map(([name, c]) => (
+                    <span key={name}><i style={{ background: c }} />{name}</span>
+                  ))}
+                </div>
+              )}
               <Preview glb={glb} />
             </div>
           </div>

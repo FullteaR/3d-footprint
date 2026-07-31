@@ -549,23 +549,6 @@ input[type="color"]:disabled { opacity: 0.45; }
   background: rgb(255 110 98 / 0.08);
 }
 
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  font-size: 11.5px;
-  color: var(--text-2);
-  margin: 2px 0 6px;
-}
-.legend span { display: inline-flex; align-items: center; gap: 5px; }
-.legend i {
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
-  display: inline-block;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.15);
-}
-
 .divider {
   border: 0;
   border-top: 1px solid var(--border);
@@ -600,6 +583,34 @@ input[type="color"]:disabled { opacity: 0.45; }
   border: 1px solid var(--border-strong);
   backdrop-filter: blur(3px);
 }
+/* 土地利用の凡例: plt.legend() 風のボックスをプレビュー内に重ねる
+   (matplotlib の "lower right"; 右上は生成中バッジが使う) */
+.preview-legend {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 500;
+  display: grid;
+  gap: 5px;
+  padding: 8px 11px;
+  background: rgb(13 20 27 / 0.85);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.1;
+  color: var(--text-2);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+.preview-legend span { display: flex; align-items: center; gap: 7px; }
+.preview-legend i {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18);
+}
+
 .busy-badge {
   position: absolute;
   top: 10px;
