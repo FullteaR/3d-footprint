@@ -1,7 +1,9 @@
 """GPX parsing: extract track points and compute a bounding box."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from lxml import etree
 
@@ -11,11 +13,29 @@ class Track:
     # Parallel arrays of WGS84 coordinates, in track order.
     lats: list[float]
     lons: list[float]
+    # Epoch seconds per point, or None when the file carries no <time> at all
+    # (route/waypoint exports often don't). Clipping drops it: a cut lands
+    # between two logged points, and nothing downstream needs the timing.
+    times: list[float] | None = None
 
     @property
     def bbox(self) -> tuple[float, float, float, float]:
         """(min_lon, min_lat, max_lon, max_lat)."""
         return (min(self.lons), min(self.lats), max(self.lons), max(self.lats))
+
+
+def _point_time(pt) -> float | None:
+    """Epoch seconds of a <time> child, or None if absent/unparsable."""
+    el = pt.find("{*}time")
+    if el is None or not el.text:
+        return None
+    try:
+        dt = datetime.fromisoformat(el.text.strip())
+    except ValueError:
+        return None
+    if dt.tzinfo is None:  # naive stamps are UTC per the GPX schema
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def parse_gpx(data: bytes) -> Track:
@@ -31,9 +51,58 @@ def parse_gpx(data: bytes) -> Track:
         if pts:
             lats = [float(p.get("lat")) for p in pts]
             lons = [float(p.get("lon")) for p in pts]
-            return Track(lats=lats, lons=lons)
+            return Track(lats=lats, lons=lons, times=_track_times(pts))
 
     raise ValueError("GPX contains no trkpt/rtept/wpt points")
+
+
+def _track_times(pts) -> list[float] | None:
+    """Per-point epoch seconds, or None when no point is stamped.
+
+    Points missing a <time> inherit the last stamped one (the leading ones the
+    first), so a partially stamped file still trims as one continuous track.
+    """
+    times = [_point_time(p) for p in pts]
+    known = [t for t in times if t is not None]
+    if not known:
+        return None
+    last = known[0]
+    filled = []
+    for t in times:
+        if t is not None:
+            last = t
+        filled.append(last)
+    return filled
+
+
+def parse_time_range_param(value: str) -> tuple[float, float]:
+    """Parse a user-supplied "start,end" time range (epoch seconds)."""
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise ValueError("time_range must be start,end in epoch seconds")
+    try:
+        start, end = (float(p) for p in parts)
+    except ValueError:
+        raise ValueError("time_range values must be numbers")
+    if not (math.isfinite(start) and math.isfinite(end)):
+        raise ValueError("time_range values must be finite")
+    if end <= start:
+        raise ValueError("time_range must satisfy start < end")
+    return start, end
+
+
+def trim_track(track: Track, start: float, end: float) -> Track:
+    """Keep only the points logged within [start, end] (epoch seconds)."""
+    if track.times is None:
+        raise ValueError("GPX has no timestamps: time_range cannot be applied")
+    keep = [i for i, t in enumerate(track.times) if start <= t <= end]
+    if len(keep) < 2:
+        raise ValueError("time_range keeps fewer than 2 track points")
+    return Track(
+        lats=[track.lats[i] for i in keep],
+        lons=[track.lons[i] for i in keep],
+        times=[track.times[i] for i in keep],
+    )
 
 
 def expand_bbox(

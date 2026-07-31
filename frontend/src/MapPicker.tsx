@@ -133,6 +133,9 @@ function rotHandleXY(g: Geo): [number, number] {
   return [0, g.hh + Math.max(0.22 * Math.max(g.hw, g.hh), 40)];
 }
 
+const TRACK_STYLE: L.PolylineOptions = { color: "#dc4628", weight: 3, opacity: 1 };
+const OUT_OF_RANGE_STYLE: L.PolylineOptions = { color: "#7d8794", weight: 2, opacity: 0.5 };
+
 // Handle icons as plain divs (Leaflet's default marker PNGs don't survive
 // bundling, and we want dedicated resize/rotate/move affordances anyway).
 const cornerIcon = L.divIcon({
@@ -157,8 +160,9 @@ const moveIcon = L.divIcon({
 // OSM slippy map showing the GPX track, with the model outline (rect / square /
 // regular hexagon, rotatable) the user edits with three handles: corner ■ =
 // resize, ● above the top edge = rotate, centre ✥ = move.
-export function MapPicker({ points, bbox, shape, rotation, resizable = true, onBboxChange, onRotationChange }: {
+export function MapPicker({ points, selection = null, bbox, shape, rotation, resizable = true, onBboxChange, onRotationChange }: {
   points: [number, number][]; // [lat, lon] in track order
+  selection?: [number, number][] | null; // in-time-range part, null = all of it
   bbox: Bbox | null;          // unrotated shape extents
   shape: Shape;
   rotation: number;           // deg CCW
@@ -169,6 +173,7 @@ export function MapPicker({ points, bbox, shape, rotation, resizable = true, onB
   const divRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map>();
   const lineRef = useRef<L.Polyline>();
+  const selLineRef = useRef<L.Polyline>();
   const outlineRef = useRef<L.Polygon>();
   const frameRef = useRef<L.Polygon>();   // dashed bbox, shown for hex
   const tetherRef = useRef<L.Polyline>(); // top edge -> rotate handle
@@ -206,9 +211,21 @@ export function MapPicker({ points, bbox, shape, rotation, resizable = true, onB
     lineRef.current?.remove();
     lineRef.current = undefined;
     if (!points.length) return;
-    lineRef.current = L.polyline(points, { color: "#dc4628", weight: 3 }).addTo(map);
+    lineRef.current = L.polyline(points, TRACK_STYLE).addTo(map);
     map.fitBounds(lineRef.current.getBounds().pad(0.15));
   }, [points]);
+
+  // Time-trimmed track: the selected leg keeps the track colour and the rest
+  // stays as a faint reminder of where it came from. (points dep: the base
+  // line is recreated above, so the style and the stacking order go with it.)
+  useEffect(() => {
+    const map = mapRef.current!;
+    selLineRef.current?.remove();
+    selLineRef.current = undefined;
+    lineRef.current?.setStyle(selection ? OUT_OF_RANGE_STYLE : TRACK_STYLE);
+    if (!selection?.length) return;
+    selLineRef.current = L.polyline(selection, TRACK_STYLE).addTo(map);
+  }, [points, selection]);
 
   // Reposition every layer from (bb, shape, th). `skip` keeps the marker being
   // dragged where Leaflet has it, so we never fight an active drag.

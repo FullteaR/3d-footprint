@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MapPicker, extentMeters, fitBbox, normalizeBbox, scaleBbox, spanMeters,
   type Bbox, type Shape,
@@ -43,6 +43,51 @@ function NumField({ value, min, max, step, digits = 0, disabled, onCommit }: {
       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
     />
   );
+}
+
+// Two overlapping range inputs make one dual-thumb slider: only the thumbs
+// take pointer events, so either one is grabbable even where they overlap.
+function RangeSlider({ min, max, step, value, onChange }: {
+  min: number;
+  max: number;
+  step: number;
+  value: [number, number];
+  onChange: (v: [number, number]) => void;
+}) {
+  const [lo, hi] = value;
+  const pct = (v: number) => (100 * (v - min)) / Math.max(max - min, 1e-9);
+  return (
+    <div className="range-dual">
+      <span className="rail" />
+      <span className="fill" style={{ left: `${pct(lo)}%`, right: `${100 - pct(hi)}%` }} />
+      <input
+        type="range" min={min} max={max} step={step} value={lo} aria-label="開始"
+        onChange={(e) => onChange([Math.min(Number(e.target.value), hi), hi])}
+      />
+      <input
+        type="range" min={min} max={max} step={step} value={hi} aria-label="終了"
+        onChange={(e) => onChange([lo, Math.max(Number(e.target.value), lo)])}
+      />
+    </div>
+  );
+}
+
+// GPX times are UTC; both are shown in the viewer's local time.
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const clockText = (sec: number, withDate: boolean) => {
+  const d = new Date(sec * 1000);
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return withDate ? `${d.getMonth() + 1}/${d.getDate()} ${hm}` : hm;
+};
+const durationText = (sec: number) => {
+  const m = Math.round(sec / 60);
+  return m >= 60 ? `${Math.floor(m / 60)}時間${pad2(m % 60)}分` : `${m}分`;
+};
+
+// Cap a polyline so huge 1 Hz logs don't bog the map down.
+function thin(pts: [number, number][]): [number, number][] {
+  const stride = Math.max(1, Math.ceil(pts.length / 3000));
+  return pts.filter((_, i) => i % stride === 0 || i === pts.length - 1);
 }
 
 // Padlock for the span/size/scale lock buttons (emoji render too unevenly).
@@ -106,7 +151,11 @@ export function App() {
   const [bbox, setBbox] = useState<Bbox | null>(null);
   const [shape, setShape] = useState<Shape>("rect");
   const [rotation, setRotation] = useState(0);
-  const [trackPts, setTrackPts] = useState<[number, number][]>([]);
+  // Whole track as parsed (`times` = epoch seconds, null when the file has no
+  // <time>), plus the time window the user kept.
+  const [track, setTrack] = useState<{ pts: [number, number][]; times: number[] | null }>({ pts: [], times: null });
+  const [timeSpan, setTimeSpan] = useState<[number, number] | null>(null);
+  const [range, setRange] = useState<[number, number] | null>(null);
   const [locked, setLocked] = useState<Lock>("size");
   const [lockedDenom, setLockedDenom] = useState<number | null>(null);
   // For the file-parse effect (which must not re-run on shape/rotation change)
@@ -159,7 +208,13 @@ export function App() {
   // automatic extent (track + 8% margin, in the current shape/rotation) as the
   // initial model outline.
   useEffect(() => {
-    if (!file) { setBbox(null); setTrackPts([]); return; }
+    const clear = () => {
+      setBbox(null);
+      setTrack({ pts: [], times: null });
+      setTimeSpan(null);
+      setRange(null);
+    };
+    if (!file) { clear(); return; }
     let stale = false;
     file.text().then((text) => {
       if (stale) return;
@@ -168,15 +223,30 @@ export function App() {
       if (!els.length) els = doc.getElementsByTagNameNS("*", "rtept");
       if (!els.length) els = doc.getElementsByTagNameNS("*", "wpt");
       const pts: [number, number][] = [];
+      const times: number[] = [];
+      let last = NaN, t0 = Infinity, t1 = -Infinity;
       for (const p of Array.from(els)) {
         const lon = Number(p.getAttribute("lon"));
         const lat = Number(p.getAttribute("lat"));
-        if (Number.isFinite(lon) && Number.isFinite(lat)) pts.push([lat, lon]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        // Unstamped points inherit the previous stamp (mirrors the backend),
+        // so a partially stamped file still trims as one continuous track.
+        const ms = Date.parse(p.getElementsByTagNameNS("*", "time")[0]?.textContent ?? "");
+        if (Number.isFinite(ms)) {
+          last = ms / 1000;
+          t0 = Math.min(t0, last);
+          t1 = Math.max(t1, last);
+        }
+        pts.push([lat, lon]);
+        times.push(last);
       }
-      if (!pts.length) { setBbox(null); setTrackPts([]); return; }
-      // Cap the polyline so huge 1 Hz logs don't bog the map down.
-      const stride = Math.max(1, Math.ceil(pts.length / 3000));
-      setTrackPts(pts.filter((_, i) => i % stride === 0 || i === pts.length - 1));
+      if (!pts.length) { clear(); return; }
+      // A too-short window (or a file stamped with a single instant) is not
+      // worth a slider — the whole track is the only sensible selection.
+      const span: [number, number] | null = t1 - t0 >= 60 ? [t0, t1] : null;
+      setTrack({ pts, times: span ? times.map((t) => (Number.isFinite(t) ? t : t0)) : null });
+      setTimeSpan(span);
+      setRange(span);
       const fit = fitBbox(pts, shapeRef.current, rotationRef.current);
       if (fit && lockedRef.current === "span" && bboxRef.current) recentre(fit);
       else applyBbox(fit);
@@ -193,6 +263,26 @@ export function App() {
   }, [plateSvg]);
 
   const bboxParam = bbox ? bbox.map((v) => v.toFixed(6)).join(",") : "";
+
+  // Trimming is off whenever the window still covers the whole log, so an
+  // untouched slider changes nothing that reaches the backend.
+  const trimmed = !!(timeSpan && range && (range[0] > timeSpan[0] || range[1] < timeSpan[1]));
+  const timeRangeParam = trimmed && range ? `${range[0].toFixed(3)},${range[1].toFixed(3)}` : "";
+  // The kept leg: what gets printed, and what 軌跡に合わせる frames.
+  const selPts = useMemo(() => {
+    const { pts, times } = track;
+    if (!trimmed || !times || !range) return pts;
+    return pts.filter((_, i) => times[i] >= range[0] && times[i] <= range[1]);
+  }, [track, trimmed, range]);
+  const mapPts = useMemo(() => thin(track.pts), [track]);
+  const mapSel = useMemo(() => (trimmed ? thin(selPts) : null), [trimmed, selPts]);
+
+  // An outing crossing midnight needs the date on every clock reading.
+  const multiDay = !!timeSpan &&
+    new Date(timeSpan[0] * 1000).toDateString() !== new Date(timeSpan[1] * 1000).toDateString();
+  const startDateText = timeSpan
+    ? new Date(timeSpan[0] * 1000).toLocaleDateString("ja-JP", { year: "numeric", month: "long", day: "numeric" })
+    : "";
 
   const spanM = bbox ? spanMeters(bbox, shape) : null;
   // While the scale is locked it is the anchor; otherwise it's derived.
@@ -280,12 +370,13 @@ export function App() {
         f.append("label_color", labelColor);
       }
       if (bboxParam) f.append("bbox", bboxParam);
+      if (timeRangeParam) f.append("time_range", timeRangeParam);
       f.append("shape", shape);
       f.append("rotation_deg", String(rotation));
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, shape, rotation]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, landuse, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, terrainColor, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, timeRangeParam, shape, rotation]
   );
 
   // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
@@ -391,6 +482,47 @@ export function App() {
                 </>
               )}
             </label>
+
+            {file && (
+              <>
+                <h3 className="section-title">時間範囲</h3>
+                {timeSpan && range ? (
+                  <>
+                    <div className="row">
+                      <label>{startDateText}</label>
+                      <span className="val">
+                        {clockText(range[0], multiDay)} – {clockText(range[1], multiDay)}
+                      </span>
+                    </div>
+                    <RangeSlider
+                      min={timeSpan[0]} max={timeSpan[1]} step={1}
+                      value={range} onChange={setRange}
+                    />
+                    <div className="range-ends">
+                      <span>{clockText(timeSpan[0], multiDay)}</span>
+                      <span>
+                        選択 {durationText(range[1] - range[0])}
+                        {trimmed && ` / 全体 ${durationText(timeSpan[1] - timeSpan[0])}`}
+                      </span>
+                      <span>{clockText(timeSpan[1], multiDay)}</span>
+                    </div>
+                    <div className="row presets">
+                      <button className="btn btn-ghost btn-xs" disabled={!trimmed} onClick={() => setRange(timeSpan)}>
+                        全体に戻す
+                      </button>
+                    </div>
+                    <p className="hint">
+                      選択した時間帯だけを軌跡として造形します（地図では範囲外が灰色になります）。
+                      モデル化する範囲（枠）は自動では変わりません。選択部分に合わせるには地図の「軌跡に合わせる」を押してください。
+                    </p>
+                  </>
+                ) : (
+                  <p className="hint">
+                    このGPXには時刻情報が無い（またはすべて同じ時刻の）ため、時間範囲は指定できません。軌跡全体を使います。
+                  </p>
+                )}
+              </>
+            )}
 
             <h3 className="section-title">大きさ・縮尺</h3>
             <div className="row">
@@ -616,11 +748,11 @@ export function App() {
               <button
                 className="btn btn-ghost"
                 onClick={() => {
-                  const bb = fitBbox(trackPts, shape, rotation);
+                  const bb = fitBbox(selPts, shape, rotation);
                   if (!bb) return;
                   if (locked === "span" && bbox) recentre(bb); else applyBbox(bb);
                 }}
-                disabled={!trackPts.length}
+                disabled={!selPts.length}
               >
                 {locked === "span" ? "軌跡の中心へ" : "軌跡に合わせる"}
               </button>
@@ -628,7 +760,7 @@ export function App() {
             <div className="card-body map-box">
               {!file && <div className="overlay-hint"><span>GPXを選択すると地図に軌跡と範囲を表示</span></div>}
               <MapPicker
-                points={trackPts} bbox={bbox} shape={shape} rotation={rotation}
+                points={mapPts} selection={mapSel} bbox={bbox} shape={shape} rotation={rotation}
                 resizable={locked !== "span"}
                 onBboxChange={onBboxChange} onRotationChange={setRotation}
               />

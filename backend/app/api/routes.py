@@ -9,7 +9,10 @@ from shapely.geometry import box
 from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
-from ..core.gpx import clip_track, expand_bbox, parse_bbox_param, parse_gpx
+from ..core.gpx import (
+    clip_track, expand_bbox, parse_bbox_param, parse_gpx,
+    parse_time_range_param, trim_track,
+)
 from ..core.coloring import category_grid, generalize
 from ..core.mesh import MeshParams, make_projection, terrain_solid
 from ..core.nameplate import nameplate_bodies
@@ -48,6 +51,7 @@ def generate(
     dem_zoom: int = Form(15),
     grid_max: int = Form(1000),
     bbox: str = Form(""),
+    time_range: str = Form(""),
     shape: str = Form("rect"),
     rotation_deg: float = Form(0.0),
     plate_svg: UploadFile | None = File(None),
@@ -57,6 +61,9 @@ def generate(
     fmt: str = Form("stl"),
 ) -> Response:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.
+
+    `time_range` ("start,end" in epoch seconds) trims the GPX to one leg of the
+    outing before anything else: the automatic extent follows the trimmed track.
 
     `bbox` ("min_lon,min_lat,max_lon,max_lat") overrides the automatic
     track-plus-margin extent. `shape` (rect / square / hex) and `rotation_deg`
@@ -71,6 +78,8 @@ def generate(
     """
     try:
         track = parse_gpx(file.file.read())
+        if time_range:
+            track = trim_track(track, *parse_time_range_param(time_range))
         plate_data = plate_svg.file.read() if plate_svg is not None else b""
         area = parse_bbox_param(bbox) if bbox else expand_bbox(track.bbox)
         region = Region(
