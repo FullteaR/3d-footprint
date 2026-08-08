@@ -1,10 +1,13 @@
 """API routes."""
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import trimesh
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from shapely.geometry import box
+from shapely.ops import transform
 
 from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
@@ -15,9 +18,13 @@ from ..core.gpx import (
 )
 from ..core.coloring import category_grid, generalize
 from ..core.mesh import MeshParams, make_projection, terrain_solid
-from ..core.nameplate import nameplate_bodies
+from ..core.nameplate import (
+    Levels, clamp_side, inset_ink, inset_plate_outline, nameplate_bodies,
+    plate_base, plate_ink, plate_levels, plate_to_print, to_plate_frame,
+)
 from ..core.region import (
-    Region, clip_track_to_polygon, parse_rotation_param, parse_shape_param,
+    Region, clip_track_to_polygon, parse_lonlat_param, parse_rotation_param,
+    parse_shape_param,
 )
 from ..core.stamp import ascii_credit, engrave_credit, formal_credit
 from ..core.terrain import fetch_elevation_grid
@@ -29,6 +36,64 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+class PlatePlan(NamedTuple):
+    """A 銘板 worked out ahead of the terrain it is let into."""
+    ink: object       # artwork, plate frame
+    tile: object      # the plate under it, plate frame
+    at: tuple         # (x, y, deg) placing the plate frame in the print frame
+    levels: Levels    # the z planes it occupies
+    footprint: object # the tile in lon/lat — where the map gets routed out
+
+
+def _plate_plan(
+    svg: bytes, center: str, width_mm: float, depth_mm: float, rotation_deg: float,
+    relief_mm: float, base_thickness_mm: float, region: Region, proj,
+) -> PlatePlan | None:
+    """Resolve the nameplate's geometry and the pocket it needs in the map.
+
+    Runs before anything is built: the plaque is a plate let into the model,
+    so the terrain has to know about it. The plate frame is the one thing that
+    stays axis-aligned — the model outline is brought into it, and only the
+    footprint goes back out (through the region's rotation) to reach the DEM.
+    """
+    if not svg.strip():
+        return None
+    if not center:
+        raise ValueError("銘板の位置が指定されていません")
+    plon, plat = parse_lonlat_param(center)
+    cx, cy = region.print_xy(float(proj.x_of(plon)), float(proj.y_of(plat)), proj)
+    at = (float(cx), float(cy), parse_rotation_param(rotation_deg))
+
+    # The plain-rect path never rotates, so its model is the fetched grid
+    # itself (which can snap a hair wider than the requested bbox).
+    outline_mm = (
+        box(0.0, 0.0, float(proj.x_of(proj.grid.lons.max())),
+            float(proj.y_of(proj.grid.lats.max())))
+        if region.is_plain else region.outline_print_mm(proj)
+    )
+    model = to_plate_frame(outline_mm.buffer(-0.2), at)
+    ink = plate_ink(svg, inset_plate_outline(
+        clamp_side(width_mm), clamp_side(depth_mm), model
+    ))
+    tile = plate_base(ink, model)   # the tile is the ink's box, so trim after
+    ink = inset_ink(ink, tile)
+
+    def to_lonlat(x, y):
+        mx, my = region.map_xy(x, y, proj)
+        return proj.lon_of(mx), proj.lat_of(my)
+
+    footprint = transform(to_lonlat, plate_to_print(tile, at))
+    z_lo, _ = proj.z_range_under(footprint)
+    levels = plate_levels(
+        z_lo, relief_mm,
+        # The tile has to stay inside the base — a plaque poking out of the
+        # underside would hold the print off the bed. Leave a little material
+        # under it too, but only out of a base thick enough to spare it.
+        z_floor=min(0.4, max(0.0, base_thickness_mm - 0.6)) - base_thickness_mm,
+    )
+    return PlatePlan(ink, tile, at, levels, footprint)
 
 
 @router.post("/generate")
@@ -54,9 +119,11 @@ def generate(
     shape: str = Form("rect"),
     rotation_deg: float = Form(0.0),
     plate_svg: UploadFile | None = File(None),
+    plate_center: str = Form(""),
+    plate_width_mm: float = Form(40.0),
     plate_depth_mm: float = Form(16.0),
+    plate_rotation_deg: float = Form(0.0),
     plate_relief_mm: float = Form(0.6),
-    label_color: str = Form("#333333"),
     fmt: str = Form("stl"),
 ) -> Response:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.
@@ -74,9 +141,11 @@ def generate(
     everything is clipped to it, and the finished model is rotated back so the
     outline prints axis-aligned.
 
-    A `plate_svg` upload adds a 銘板: a slab hanging off the model's front
-    (south) edge with the SVG artwork raised on top (auto-fitted; text must
-    be outlined to paths by the design tool).
+    A `plate_svg` upload adds a 銘板 with the SVG artwork raised on top
+    (auto-fitted; text must be outlined to paths by the design tool): a flat
+    pad on the map itself at `plate_center` ("lon,lat"), `plate_width_mm` x
+    `plate_depth_mm` and turned by `plate_rotation_deg` (CCW *relative to the
+    model outline*, so rotating the model carries the plate with it).
     """
     try:
         track = parse_gpx(file.file.read())
@@ -106,6 +175,18 @@ def generate(
         if not region.is_plain:
             clip_ll = region.polygon_lonlat()   # for the track (lon/lat)
             clip_mm = region.polygon_mm(proj)   # for terrain / buildings / bridges
+
+        # 銘板: worked out before the terrain is built, because the map has to
+        # be routed out under it — the plaque is a plate let into a pocket, not
+        # something sitting on the surface. The bodies themselves come last
+        # (they are built straight in the print frame, so they must not be
+        # caught by the rotation below).
+        plate = _plate_plan(
+            plate_data, plate_center, plate_width_mm, plate_depth_mm,
+            plate_rotation_deg, plate_relief_mm, base_thickness_mm, region, proj,
+        )
+        if plate is not None:
+            proj.flatten_under(plate.footprint, plate.levels.pocket)
 
         # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells PLATEAU
         # doesn't classify; the rest stays the terrain colour. None when neither
@@ -197,18 +278,15 @@ def generate(
             bodies, landuse, include_buildings, px0, px1, base_thickness_mm,
         )
 
-        if plate_data.strip():
-            bodies += nameplate_bodies(
-                plate_data, px0, px1, 0.0,
-                base_thickness_mm, plate_depth_mm, plate_relief_mm,
-            )
+        if plate is not None:
+            bodies += nameplate_bodies(plate.ink, plate.tile, plate.at, plate.levels)
 
-        # "terrain" label (land-use off) maps to the user's terrain color;
-        # the nameplate slab follows it so only the lettering stands out.
+        # "terrain" label (land-use off) maps to the user's terrain color; the
+        # nameplate tile follows it so only the artwork stands out (in the
+        # fixed label colour from DEFAULT_COLORS).
         colors = {
             "terrain": terrain_color, "track": track_color,
-            "building": building_color,
-            "plate": terrain_color, "label": label_color,
+            "building": building_color, "plate": terrain_color,
         }
         data, content_type, ext = export_bodies(
             bodies, fmt, colors,

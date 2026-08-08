@@ -37,6 +37,20 @@ def parse_rotation_param(value: float) -> float:
     return float(value) % 360.0
 
 
+def parse_lonlat_param(value: str) -> tuple[float, float]:
+    """Parse a user-supplied "lon,lat" point."""
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise ValueError("point must be lon,lat")
+    try:
+        lon, lat = (float(p) for p in parts)
+    except ValueError:
+        raise ValueError("point values must be numbers")
+    if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+        raise ValueError("point is out of range")
+    return lon, lat
+
+
 @dataclass(frozen=True)
 class Region:
     bbox: tuple[float, float, float, float]  # unrotated extents (w, s, e, n)
@@ -110,6 +124,43 @@ class Region:
         """Axis-aligned lon/lat bounds of the rotated outline (the DEM extent)."""
         return self.polygon_lonlat().bounds
 
+    def _print_frame(self, proj: Projection):
+        """(centre, offset, cos, sin) of the map -> print frame transform."""
+        clon, clat = self.center
+        th = math.radians(self.rotation_deg)
+        hw, hh = self.half_extents_m
+        return (
+            (float(proj.x_of(clon)), float(proj.y_of(clat))),
+            (hw * proj.scale, hh * proj.scale),
+            math.cos(th), math.sin(th),
+        )
+
+    def print_xy(self, x, y, proj: Projection):
+        """Map-frame millimetres -> the axis-aligned print frame."""
+        if self.is_plain:
+            return x, y
+        (cx, cy), (ox, oy), c, s = self._print_frame(proj)
+        xr, yr = x - cx, y - cy
+        return xr * c + yr * s + ox, -xr * s + yr * c + oy
+
+    def map_xy(self, x, y, proj: Projection):
+        """Inverse of `print_xy`: print frame -> map-frame millimetres.
+
+        What the terrain has to be sampled through — the elevation grid still
+        lives in the unrotated DEM frame after the scene has been rotated.
+        """
+        if self.is_plain:
+            return x, y
+        (cx, cy), (ox, oy), c, s = self._print_frame(proj)
+        xr, yr = x - ox, y - oy
+        return xr * c - yr * s + cx, xr * s + yr * c + cy
+
+    def outline_print_mm(self, proj: Projection) -> Polygon:
+        """The print outline in the print frame (mm) — where the model ends."""
+        hw, hh = self.half_extents_m
+        pts = self._outline_local() * proj.scale
+        return Polygon(pts + np.array([hw * proj.scale, hh * proj.scale]))
+
     def to_print_frame(self, bodies, proj: Projection) -> None:
         """Rotate finished bodies so the outline prints axis-aligned at origin.
 
@@ -120,17 +171,9 @@ class Region:
         """
         if self.is_plain:
             return
-        clon, clat = self.center
-        cx, cy = float(proj.x_of(clon)), float(proj.y_of(clat))
-        th = math.radians(self.rotation_deg)
-        c, s = math.cos(th), math.sin(th)
-        hw, hh = self.half_extents_m
-        ox, oy = hw * proj.scale, hh * proj.scale
         for b in bodies:
             v = np.asarray(b.mesh.vertices, dtype=np.float64).copy()
-            xr, yr = v[:, 0] - cx, v[:, 1] - cy
-            v[:, 0] = xr * c + yr * s + ox
-            v[:, 1] = -xr * s + yr * c + oy
+            v[:, 0], v[:, 1] = self.print_xy(v[:, 0], v[:, 1], proj)
             b.mesh.vertices = v
 
 

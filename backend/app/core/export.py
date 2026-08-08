@@ -3,9 +3,9 @@
 Each face carries a *label* (a colour-layer name: a land-use category, "track",
 "base", ...). Labels across all bodies form a small palette. The heavy geometry
 is shared; only the serializer differs:
-  - 3mf : one object with <basematerials> palette + per-triangle material ref
-          (so slicers map colour -> filament). Written directly (trimesh's 3MF
-          export does not preserve per-face colour).
+  - 3mf : one named object per body + <basematerials> palette + per-triangle
+          material ref (so slicers map colour -> filament). Written directly
+          (trimesh's 3MF export does not preserve per-face colour).
   - glb : per-face vertex colours (preview).
   - stl : geometry only (no colour).
 """
@@ -33,8 +33,22 @@ DEFAULT_COLORS: dict[str, str] = {
     "base": "#8a7f6f",
     "track": "#dc4628",
     "building": "#b0b0b0",  # buildings + bridges (same structure colour layer)
-    "plate": "#c2b280",     # nameplate slab (routes maps it to the terrain colour)
-    "label": "#333333",     # nameplate lettering
+    "plate": "#c2b280",     # nameplate tile (routes maps it to the terrain colour)
+    "label": "#333333",     # the nameplate artwork raised on it
+}
+
+# Slicer-facing part names for the labels whose internal name isn't obvious in
+# an object list; every other label is already its own best name.
+_PART_NAMES: dict[str, str] = {
+    "bare": "bare-ground",
+    "other": "other-landuse",
+    "plate": "nameplate-base",
+    "label": "nameplate-text",
+}
+
+# Same, for the bodies that carry more than one colour layer at once.
+_MIXED_NAMES: dict[frozenset[str], str] = {
+    frozenset({"plate", "label"}): "nameplate",
 }
 
 _FORMATS = {
@@ -103,6 +117,28 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def _part_names(bodies) -> list[str]:
+    """One name per body: what the part is.
+
+    A slicer's object list is the only place the user meets these parts, and
+    "Object 3" says nothing about which one it is — so each carries its layer's
+    name ("forest"). A body that wants more than one filament (the nameplate:
+    tile plus artwork) is named for the whole. Repeats (buildings and bridges
+    share the structure layer) get numbered so every name stays unique.
+    """
+    names: list[str] = []
+    seen: dict[str, int] = {}
+    for b in bodies:
+        uniq = np.unique(b.face_labels())
+        if uniq.size == 1:
+            name = _PART_NAMES.get(str(uniq[0]), str(uniq[0]))
+        else:
+            name = _MIXED_NAMES.get(frozenset(str(u) for u in uniq), "mixed")
+        seen[name] = seen.get(name, 0) + 1
+        names.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+    return names
+
+
 def export_bodies(
     bodies: list[Body],
     fmt: str,
@@ -152,6 +188,10 @@ def export_bodies(
                 m.unmerge_vertices()
                 rgb = np.array([palette[index_of[l]][1] for l in labels], np.uint8)
                 m.visual.face_colors = np.column_stack([rgb, np.full(len(rgb), 255, np.uint8)])
+                # Assign the (now per-face) normals explicitly: the exporter
+                # only writes NORMAL when it is already there, and a glTF
+                # without it renders unlit — the plaque came out solid black.
+                m.vertex_normals = np.repeat(m.face_normals, 3, axis=0)
             scene.add_geometry(m, geom_name=f"body{i}")
         post = None
         if credit_full:
@@ -219,6 +259,12 @@ def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
     overlapping parts and map each material colour to a filament. The 出典
     sentence goes into the spec's model metadata (Copyright + Description —
     the fields slicers actually surface).
+
+    Every object is named ("forest") both in the core spec's `name` attribute
+    and in a PrusaSlicer-style `Slic3r_PE_model.config`, because the two halves
+    of the slicer world read different ones: Cura / 3D Builder / most viewers
+    take the attribute, the PrusaSlicer family (Orca, Bambu, SuperSlicer) takes
+    the config. Without a name the object list is just "Object 1..N".
     """
     meta = ""
     if credit_full:
@@ -233,10 +279,13 @@ def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
         for name, (r, g, b) in palette
     )
 
+    names = _part_names(bodies)
     objects: list[str] = []
     items: list[str] = []
+    configs: list[str] = []
     for i, body in enumerate(bodies):
         oid = i + 2  # id 1 is the basematerials group
+        name = escape(names[i], {'"': "&quot;"})
         verts = "".join(
             f'<vertex x="{x:.6f}" y="{y:.6f}" z="{z:.6f}"/>'
             for x, y, z in body.mesh.vertices
@@ -247,11 +296,22 @@ def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
             for (a, b, c), l in zip(body.mesh.faces, lbl)
         )
         objects.append(
-            f'<object id="{oid}" type="model"><mesh>'
+            f'<object id="{oid}" type="model" name="{name}"><mesh>'
             f"<vertices>{verts}</vertices><triangles>{tris}</triangles>"
             "</mesh></object>"
         )
         items.append(f'<item objectid="{oid}"/>')
+        # The object's single volume spans all its triangles.
+        configs.append(
+            f'<object id="{oid}" instances_count="1">'
+            f'<metadata type="object" key="name" value="{name}"/>'
+            f'<volume firstid="0" lastid="{len(body.mesh.faces) - 1}">'
+            f'<metadata type="volume" key="name" value="{name}"/>'
+            f'<metadata type="volume" key="volume_type" value="ModelPart"/>'
+            '<mesh edges_fixed="0" degenerate_facets="0" facets_removed="0" '
+            'facets_reversed="0" backwards_edges="0"/>'
+            "</volume></object>"
+        )
 
     model = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -266,11 +326,19 @@ def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
         "</model>"
     )
 
+    model_config = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<config>{"".join(configs)}</config>'
+    )
+
     content_types = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
+        # Declared so the package stays OPC-valid with the slicer sidecar in it
+        # (PrusaSlicer omits this; readers that check would fault on it).
+        '<Default Extension="config" ContentType="text/xml"/>'
         "</Types>"
     )
     rels = (
@@ -286,4 +354,5 @@ def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
         z.writestr("[Content_Types].xml", content_types)
         z.writestr("_rels/.rels", rels)
         z.writestr("3D/3dmodel.model", model)
+        z.writestr("Metadata/Slic3r_PE_model.config", model_config)
     return buf.getvalue()

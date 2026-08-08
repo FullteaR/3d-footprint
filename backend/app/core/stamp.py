@@ -26,7 +26,6 @@ import os
 from functools import lru_cache
 
 import freetype
-import mapbox_earcut as earcut
 import numpy as np
 import shapely
 import trimesh
@@ -34,8 +33,7 @@ from shapely import affinity
 from shapely.geometry.polygon import orient
 
 from .export import Body
-from .massing import _ring_xy
-from .nameplate import _fill_geom, _open_pinches
+from .nameplate import _fill_geom, _open_pinches, _tri_2d
 
 _FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
@@ -188,34 +186,6 @@ def _text_ink(face: freetype.Face, text: str) -> shapely.Geometry | None:
         contours.extend(pen.contours)
         pen_x += face.glyph.advance.x + _TRACKING * face.units_per_EM
     return _fill(contours)
-
-
-def _tri_2d(geom: shapely.Geometry) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Triangulate a polygonal region: [(points_2d, ccw_faces), ...]."""
-    out = []
-    for p in getattr(geom, "geoms", [geom]):
-        if not isinstance(p, shapely.Polygon) or p.is_empty:
-            continue
-        poly = orient(p, 1.0)
-        rings = [_ring_xy(poly.exterior)] + [_ring_xy(r) for r in poly.interiors]
-        rings = [r for r in rings if len(r) >= 3]
-        if not rings:
-            continue
-        pts2d = np.vstack(rings)
-        ends = np.cumsum([len(r) for r in rings]).astype(np.uint32)
-        try:
-            idx = earcut.triangulate_float64(np.ascontiguousarray(pts2d), ends)
-        except Exception:
-            continue
-        if len(idx) < 3:
-            continue
-        F = np.asarray(idx, np.int64).reshape(-1, 3)
-        a, b, c = pts2d[F[:, 0]], pts2d[F[:, 1]], pts2d[F[:, 2]]
-        cw = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) \
-           - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]) < 0
-        F[cw] = F[cw, ::-1]
-        out.append((pts2d, F))
-    return out
 
 
 def _engrave_mesh(

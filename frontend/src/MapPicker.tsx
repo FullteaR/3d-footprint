@@ -115,6 +115,125 @@ function ll(g: Geo, x: number, y: number, th: number): L.LatLngTuple {
   return [g.clat + yr / M_PER_DEG_LAT, g.clon + xr / g.mlon];
 }
 
+// Inverse of ll: [lat, lng] -> the shape's local metre frame.
+function local(g: Geo, lat: number, lon: number, th: number): [number, number] {
+  const x = (lon - g.clon) * g.mlon, y = (lat - g.clat) * M_PER_DEG_LAT;
+  return [x * Math.cos(th) + y * Math.sin(th), -x * Math.sin(th) + y * Math.cos(th)];
+}
+
+// ---- nameplate placement inside the outline ---------------------------------
+
+// The nameplate's footprint on the map. `deg` is measured against the model
+// outline, not north, so turning the model carries the plate around with it;
+// `minM` is the smallest printable side in metres (the caller owns the mm).
+export type Plate = {
+  center: [number, number];
+  wM: number;
+  hM: number;
+  deg: number;
+  minM: number;
+};
+
+// The outline as half-planes |n·p| <= d in the local frame (both shapes are
+// convex and centre-symmetric): rect/square two, flat-top hexagon three.
+function halfPlanes(bb: Bbox, shape: Shape): [number, number, number][] {
+  const g = geoOf(bb);
+  if (shape === "hex") {
+    const d = (SQ3 / 2) * Math.min(g.hw, (2 * g.hh) / SQ3);
+    return [30, 90, 150].map((a) => [Math.cos(a * RAD), Math.sin(a * RAD), d]);
+  }
+  const [hw, hh] = shape === "square"
+    ? [Math.min(g.hw, g.hh), Math.min(g.hw, g.hh)] : [g.hw, g.hh];
+  return [[1, 0, hw], [0, 1, hh]];
+}
+
+// Pull a plate centre back until the whole plate sits inside the outline.
+// Each half-plane is shrunk by the plate's own reach along that normal (the
+// turned box's support function), so the rectangle — not just its centre —
+// is what stays in. Corners need the passes: fixing one plane can push the
+// centre past another.
+export function clampPlate(
+  center: [number, number], bb: Bbox, shape: Shape, rotationDeg: number,
+  wM: number, hM: number, plateDeg: number,
+): [number, number] {
+  const g = geoOf(bb), th = rotationDeg * RAD, ph = plateDeg * RAD;
+  const [ux, uy] = [Math.cos(ph), Math.sin(ph)];   // the plate's own axes
+  let [x, y] = local(g, center[0], center[1], th);
+  for (let pass = 0; pass < 3; pass++) {
+    for (const [nx, ny, d] of halfPlanes(bb, shape)) {
+      const reach = (wM / 2) * Math.abs(nx * ux + ny * uy)
+                  + (hM / 2) * Math.abs(-nx * uy + ny * ux);
+      const lim = d - reach;
+      const t = x * nx + y * ny;
+      // lim < 0: the plate is wider than the model here — centre it and let
+      // the backend cut the overhang flush with the model edge.
+      const push = lim < 0 ? t : Math.sign(t) * Math.max(Math.abs(t) - lim, 0);
+      x -= push * nx;
+      y -= push * ny;
+    }
+  }
+  return ll(g, x, y, th) as [number, number];
+}
+
+// The spot inside the outline whose plate clears the track by the most — what
+// 「軌跡を避けて配置」 picks. Candidates are a grid over the outline, each
+// pulled inside first; clearance is the distance from the plate rectangle to
+// the nearest track point, measured in the plate's own frame so its angle
+// counts. With no track the model centre wins (nothing beats infinity).
+export function freeSpot(
+  pts: [number, number][], bb: Bbox, shape: Shape, rotationDeg: number,
+  wM: number, hM: number, plateDeg: number,
+): [number, number] {
+  const g = geoOf(bb), th = rotationDeg * RAD, ph = plateDeg * RAD;
+  const c = Math.cos(ph), s = Math.sin(ph);
+  const stride = Math.max(1, Math.ceil(pts.length / 800));
+  const track = pts.filter((_, i) => i % stride === 0)
+    .map(([lat, lon]) => local(g, lat, lon, th));
+  const clearance = (x: number, y: number) => {
+    let best = Infinity;
+    for (const [px, py] of track) {
+      const ax = px - x, ay = py - y;
+      const dx = Math.max(Math.abs(ax * c + ay * s) - wM / 2, 0);
+      const dy = Math.max(Math.abs(-ax * s + ay * c) - hM / 2, 0);
+      const d = dx * dx + dy * dy;
+      if (d < best) { best = d; if (d === 0) break; }
+    }
+    return best;
+  };
+  const fit = (p: [number, number]) =>
+    clampPlate(p, bb, shape, rotationDeg, wM, hM, plateDeg);
+  const N = 25;
+  let best = fit([g.clat, g.clon]);
+  let bestScore = clearance(...local(g, best[0], best[1], th));
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const cand = fit(ll(g, g.hw * (2 * i / (N - 1) - 1),
+                          g.hh * (2 * j / (N - 1) - 1), th) as [number, number]);
+      const score = clearance(...local(g, cand[0], cand[1], th));
+      if (score > bestScore) { bestScore = score; best = cand; }
+    }
+  }
+  return best;
+}
+
+// The plate's own frame (metres about its centre, turned by the model's
+// rotation and its own) <-> [lat, lng].
+function plateFrame(p: Plate, rotationDeg: number) {
+  const th = (rotationDeg + p.deg) * RAD;
+  const c = Math.cos(th), s = Math.sin(th);
+  const mlon = M_PER_DEG_LON * Math.cos(p.center[0] * RAD);
+  return {
+    at: (x: number, y: number): L.LatLngTuple => [
+      p.center[0] + (x * s + y * c) / M_PER_DEG_LAT,
+      p.center[1] + (x * c - y * s) / mlon,
+    ],
+    of: (lat: number, lng: number): [number, number] => {
+      const dx = (lng - p.center[1]) * mlon, dy = (lat - p.center[0]) * M_PER_DEG_LAT;
+      return [dx * c + dy * s, -dx * s + dy * c];
+    },
+  };
+}
+
 function outlinePts(g: Geo, shape: Shape, th: number): L.LatLngTuple[] {
   if (shape === "hex") { // flat-top regular hexagon, circumradius = hw
     return [0, 1, 2, 3, 4, 5].map((k) =>
@@ -156,19 +275,50 @@ const moveIcon = L.divIcon({
   iconSize: [22, 22],
   iconAnchor: [11, 11],
 });
+// The nameplate carries the same three affordances in its own colour.
+const PLATE_COLOR = "#2e5e8c";
+const plateIcon = L.divIcon({
+  className: "",
+  html: `<div style="width:20px;height:20px;display:flex;align-items:center;justify-content:center;background:#fff;border:2px solid ${PLATE_COLOR};border-radius:50%;box-shadow:0 1px 3px #0006;cursor:move;font-size:12px;line-height:1;color:${PLATE_COLOR}">✥</div>`,
+  iconSize: [20, 20],
+  iconAnchor: [10, 10],
+});
+const plateCornerIcon = L.divIcon({
+  className: "",
+  html: `<div style="width:12px;height:12px;background:#fff;border:2px solid ${PLATE_COLOR};border-radius:2px;box-shadow:0 1px 3px #0006;cursor:nwse-resize"></div>`,
+  iconSize: [12, 12],
+  iconAnchor: [6, 6],
+});
+const plateRotateIcon = L.divIcon({
+  className: "",
+  html: `<div style="width:14px;height:14px;background:#fff;border:2px solid ${PLATE_COLOR};border-radius:50%;box-shadow:0 1px 3px #0006;cursor:grab"></div>`,
+  iconSize: [14, 14],
+  iconAnchor: [7, 7],
+});
+
+export type PlateEdit = {
+  center?: [number, number];
+  wM?: number;
+  hM?: number;
+  deg?: number;
+};
 
 // OSM slippy map showing the GPX track, with the model outline (rect / square /
 // regular hexagon, rotatable) the user edits with three handles: corner ■ =
-// resize, ● above the top edge = rotate, centre ✥ = move.
-export function MapPicker({ points, selection = null, bbox, shape, rotation, resizable = true, onBboxChange, onRotationChange }: {
+// resize, ● above the top edge = rotate, centre ✥ = move. The nameplate
+// footprint carries the same three handles in blue — the track is right there
+// to place it clear of.
+export function MapPicker({ points, selection = null, bbox, shape, rotation, resizable = true, plate = null, onBboxChange, onRotationChange, onPlateChange }: {
   points: [number, number][]; // [lat, lon] in track order
   selection?: [number, number][] | null; // in-time-range part, null = all of it
   bbox: Bbox | null;          // unrotated shape extents
   shape: Shape;
   rotation: number;           // deg CCW
   resizable?: boolean;        // false: fixed-extent frame, pan/rotate only
+  plate?: Plate | null;       // nameplate footprint (metres), null = no plate
   onBboxChange: (bb: Bbox) => void;
   onRotationChange: (deg: number) => void;
+  onPlateChange?: (edit: PlateEdit) => void;
 }) {
   const divRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map>();
@@ -181,13 +331,21 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
   const neRef = useRef<L.Marker>();
   const mvRef = useRef<L.Marker>();
   const rotMarkRef = useRef<L.Marker>();
+  const plateBoxRef = useRef<L.Polygon>();
+  const plateTetherRef = useRef<L.Polyline>();
+  const plateMkRef = useRef<L.Marker>();
+  const plateSwRef = useRef<L.Marker>();
+  const plateNeRef = useRef<L.Marker>();
+  const plateRotRef = useRef<L.Marker>();
 
   // Latest values for use inside Leaflet event handlers.
   const bboxRef = useRef(bbox); bboxRef.current = bbox;
   const shapeRef = useRef(shape); shapeRef.current = shape;
   const rotRef = useRef(rotation); rotRef.current = rotation;
+  const plateRef = useRef(plate); plateRef.current = plate;
   const cbBoxRef = useRef(onBboxChange); cbBoxRef.current = onBboxChange;
   const cbRotRef = useRef(onRotationChange); cbRotRef.current = onRotationChange;
+  const cbPlateRef = useRef(onPlateChange); cbPlateRef.current = onPlateChange;
 
   useEffect(() => {
     const map = L.map(divRef.current!, { zoomSnap: 0.5 });
@@ -345,6 +503,112 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
     }
     redraw(bbox, shape, rotation);
   }, [bbox, shape, rotation]);
+
+  // Nameplate footprint with its own move / resize / rotate handles. Every
+  // edit is clamped to the model outline here as well as in the caller, so
+  // the rectangle on screen is always the plate that will be printed.
+  function redrawPlate(p: Plate, skip?: L.Marker) {
+    const { at } = plateFrame(p, rotRef.current);
+    const hw = p.wM / 2, hh = p.hM / 2;
+    plateBoxRef.current!.setLatLngs([at(-hw, -hh), at(hw, -hh), at(hw, hh), at(-hw, hh)]);
+    const reach = hh + Math.max(0.35 * Math.max(hw, hh), 25);
+    plateTetherRef.current!.setLatLngs([at(0, hh), at(0, reach)]);
+    const place = (m: L.Marker | undefined, pos: L.LatLngTuple) => {
+      if (m && m !== skip) m.setLatLng(pos);
+    };
+    place(plateMkRef.current, p.center);
+    place(plateSwRef.current, at(-hw, -hh));
+    place(plateNeRef.current, at(hw, hh));
+    place(plateRotRef.current, at(0, reach));
+  }
+
+  // Every handle answers the same question — what plate does this drag mean —
+  // and the answer is clamped back inside the outline before it is drawn or
+  // emitted.
+  function plateFrom(edit: PlateEdit): Plate {
+    const p = plateRef.current!;
+    const next = { ...p, ...edit };
+    return {
+      ...next,
+      center: clampPlate(next.center, bboxRef.current!, shapeRef.current,
+                         rotRef.current, next.wM, next.hM, next.deg),
+    };
+  }
+
+  // Resize: the opposite corner stays put and the diagonal, read in the
+  // plate's own frame, gives the new sides and centre.
+  function plateResize(dragged: L.Marker, other: L.Marker): PlateEdit {
+    const p = plateRef.current!;
+    const f = plateFrame(p, rotRef.current);
+    const D = dragged.getLatLng(), F = other.getLatLng();
+    const [dx, dy] = f.of(D.lat, D.lng);
+    const [fx, fy] = f.of(F.lat, F.lng);
+    const wM = Math.max(Math.abs(dx - fx), p.minM);
+    const hM = Math.max(Math.abs(dy - fy), p.minM);
+    return {
+      wM, hM,
+      center: f.at(fx + Math.sign(dx - fx || 1) * wM / 2,
+                   fy + Math.sign(dy - fy || 1) * hM / 2) as [number, number],
+    };
+  }
+
+  // Rotate: the handle's bearing about the plate centre, less the model's own
+  // rotation — the plate angle is stored relative to the outline.
+  function plateRotate(): PlateEdit {
+    const p = plateRef.current!;
+    const P = plateRotRef.current!.getLatLng();
+    const mlon = M_PER_DEG_LON * Math.cos(p.center[0] * RAD);
+    const vx = (P.lng - p.center[1]) * mlon;
+    const vy = (P.lat - p.center[0]) * M_PER_DEG_LAT;
+    let deg = Math.round(Math.atan2(vy, vx) / RAD - 90 - rotRef.current);
+    deg = ((deg % 360) + 360) % 360;
+    return { deg: deg > 180 ? deg - 360 : deg };
+  }
+
+  useEffect(() => {
+    const map = mapRef.current!;
+    if (!plate || !bbox) {
+      for (const ref of [plateBoxRef, plateTetherRef] as const) {
+        ref.current?.remove(); ref.current = undefined;
+      }
+      for (const ref of [plateMkRef, plateSwRef, plateNeRef, plateRotRef] as const) {
+        ref.current?.remove(); ref.current = undefined;
+      }
+      return;
+    }
+    if (!plateBoxRef.current) {
+      plateBoxRef.current = L.polygon([], {
+        color: PLATE_COLOR, weight: 2, fillOpacity: 0.35, interactive: false,
+      }).addTo(map);
+      plateTetherRef.current = L.polyline([], {
+        color: PLATE_COLOR, weight: 1, dashArray: "2 4", interactive: false,
+      }).addTo(map);
+      const mk = (icon: L.DivIcon) =>
+        L.marker([0, 0], { icon, draggable: true, autoPan: true }).addTo(map);
+      plateMkRef.current = mk(plateIcon);
+      plateSwRef.current = mk(plateCornerIcon);
+      plateNeRef.current = mk(plateCornerIcon);
+      plateRotRef.current = mk(plateRotateIcon);
+
+      const wire = (m: L.Marker, calc: () => PlateEdit) => {
+        m.on("drag", () => redrawPlate(plateFrom(calc()), m));
+        m.on("dragend", () => {
+          const next = plateFrom(calc());
+          redrawPlate(next);   // snap the handles even if the state is unchanged
+          const { center, wM, hM, deg } = next;
+          cbPlateRef.current?.({ center, wM, hM, deg });
+        });
+      };
+      wire(plateMkRef.current, () => {
+        const p = plateMkRef.current!.getLatLng();
+        return { center: [p.lat, p.lng] };
+      });
+      wire(plateSwRef.current, () => plateResize(plateSwRef.current!, plateNeRef.current!));
+      wire(plateNeRef.current, () => plateResize(plateNeRef.current!, plateSwRef.current!));
+      wire(plateRotRef.current, plateRotate);
+    }
+    redrawPlate(plate);
+  }, [plate, bbox, shape, rotation]);
 
   // Corner handles follow the size/scale lock: with the real-world extent
   // locked the frame can only pan and rotate. (bbox dep: the markers are

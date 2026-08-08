@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  MapPicker, extentMeters, fitBbox, normalizeBbox, scaleBbox, spanMeters,
-  type Bbox, type Shape,
+  MapPicker, clampPlate, extentMeters, fitBbox, freeSpot, normalizeBbox,
+  scaleBbox, spanMeters, type Bbox, type PlateEdit, type Shape,
 } from "./MapPicker";
 import { Preview } from "./Preview";
 import "./ui.css";
@@ -90,6 +90,10 @@ const durationText = (sec: number) => {
 // slab (mirrors terrain_color's backend default; no longer user-editable).
 const TERRAIN_COLOR = "#c2b280";
 
+// Printable range for a nameplate side (mm), for both the fields and the
+// map's corner handles.
+const PLATE_MIN_MM = 5, PLATE_MAX_MM = 200;
+
 // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
 const LANDUSE_LEGEND: [string, string][] = [
   ["水面", "#4a80c0"], ["森林・緑地", "#3f7d3a"], ["農地", "#c9d17a"],
@@ -167,9 +171,13 @@ export function App() {
   const [includePlate, setIncludePlate] = useState(false);
   const [plateSvg, setPlateSvg] = useState<File | null>(null);
   const [plateUrl, setPlateUrl] = useState<string | null>(null);
+  // The plate is a pad laid on the map at plateCenter ([lat, lon]), sized in
+  // printed mm and turned by plateRotation relative to the model outline.
+  const [plateCenter, setPlateCenter] = useState<[number, number] | null>(null);
+  const [plateWidth, setPlateWidth] = useState(40);
   const [plateDepth, setPlateDepth] = useState(16);
+  const [plateRotation, setPlateRotation] = useState(0);
   const [plateRelief, setPlateRelief] = useState(0.6);
-  const [labelColor, setLabelColor] = useState("#333333");
   const [trackColor, setTrackColor] = useState("#dc4628");
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
   const [fmt, setFmt] = useState("3mf");
@@ -358,13 +366,44 @@ export function App() {
     return `${f(w)} × ${f(h)}`;
   })();
 
-  // Printed width of the nameplate slab (the model's front edge; a hexagon's
-  // flat bottom edge is its middle half) — for the preview's aspect ratio.
-  const plateWmm = (() => {
-    if (!bbox || !spanM) return sizeMm;
-    const mm = (sizeMm * extentMeters(bbox)[0]) / spanM;
-    return shape === "hex" ? mm / 2 : mm;
-  })();
+  // The plate footprint on the map, in real metres. Kept inside the outline
+  // here (not only while dragging) so a resized model or a widened plate
+  // pulls it back in instead of silently printing a cut-off plaque.
+  const mPerMm = spanM ? spanM / sizeMm : null;
+  const plateBox = useMemo(() => {
+    if (!includePlate || !bbox || !mPerMm || !plateCenter) return null;
+    const wM = plateWidth * mPerMm, hM = plateDepth * mPerMm;
+    return {
+      center: clampPlate(plateCenter, bbox, shape, rotation, wM, hM, plateRotation),
+      wM, hM, deg: plateRotation, minM: PLATE_MIN_MM * mPerMm,
+    };
+  }, [includePlate, bbox, mPerMm, plateCenter, shape, rotation, plateWidth, plateDepth, plateRotation]);
+
+  // Put the plate where the printed track leaves the most room.
+  function autoPlacePlate() {
+    if (!bbox || !mPerMm) return;
+    setPlateCenter(freeSpot(
+      selPts, bbox, shape, rotation,
+      plateWidth * mPerMm, plateDepth * mPerMm, plateRotation));
+  }
+
+  // A plate longer than the model's own long edge could only be printed cut
+  // off at both ends, so that is where the corner handles (and the fields)
+  // stop.
+  const plateMaxMm = Math.min(PLATE_MAX_MM, sizeMm);
+
+  // Map edits come back in metres: the printed size is what the user sets, so
+  // the sides are converted back to whole millimetres.
+  const onPlateChange = useCallback((e: PlateEdit) => {
+    if (e.center) setPlateCenter(e.center);
+    if (e.deg !== undefined) setPlateRotation(e.deg);
+    if (mPerMm) {
+      const mm = (m: number) =>
+        Math.min(plateMaxMm, Math.max(PLATE_MIN_MM, Math.round(m / mPerMm)));
+      if (e.wM !== undefined) setPlateWidth(mm(e.wM));
+      if (e.hM !== undefined) setPlateDepth(mm(e.hM));
+    }
+  }, [mPerMm, plateMaxMm]);
 
   const lockBtn = (item: Lock, disabled = false) => (
     <button
@@ -395,11 +434,15 @@ export function App() {
       f.append("terrain_color", TERRAIN_COLOR);
       f.append("track_color", trackColor);
       f.append("building_color", buildingColor);
-      if (includePlate && plateSvg) {
+      if (includePlate && plateSvg && plateBox) {
         f.append("plate_svg", plateSvg);
+        f.append("plate_width_mm", String(plateWidth));
         f.append("plate_depth_mm", String(plateDepth));
+        f.append("plate_rotation_deg", String(plateRotation));
         f.append("plate_relief_mm", String(plateRelief));
-        f.append("label_color", labelColor);
+        // The backend takes the position in lon,lat — the map frame can be
+        // rotated, so a print-frame offset would not survive the round trip.
+        f.append("plate_center", `${plateBox.center[1]},${plateBox.center[0]}`);
       }
       if (bboxParam) f.append("bbox", bboxParam);
       if (timeRangeParam) f.append("time_range", timeRangeParam);
@@ -408,7 +451,7 @@ export function App() {
       f.append("fmt", outFmt);
       return f;
     },
-    [file, sizeMm, verticalScale, baseThickness, gridMax, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, trackColor, buildingColor, includePlate, plateSvg, plateDepth, plateRelief, labelColor, bboxParam, timeRangeParam, shape, rotation]
+    [file, sizeMm, verticalScale, baseThickness, gridMax, minColor, includeTrack, trackWidth, trackHeight, includeBuildings, buildingScale, minFeature, trackColor, buildingColor, includePlate, plateSvg, plateBox, plateWidth, plateDepth, plateRotation, plateRelief, bboxParam, timeRangeParam, shape, rotation]
   );
 
   // Minimum span + shape aspect ratio + the lock are enforced centrally so
@@ -650,7 +693,13 @@ export function App() {
             <h3 className="section-title">銘板</h3>
             <div className="row">
               <label>銘板を付ける</label>
-              <input className="toggle" type="checkbox" checked={includePlate} onChange={(e) => setIncludePlate(e.target.checked)} />
+              <input
+                className="toggle" type="checkbox" checked={includePlate}
+                onChange={(e) => {
+                  setIncludePlate(e.target.checked);
+                  if (e.target.checked && !plateCenter) autoPlacePlate();
+                }}
+              />
             </div>
             {includePlate && (
               <>
@@ -661,29 +710,47 @@ export function App() {
                   ) : (
                     <div>銘板デザインのSVGを選択</div>
                   )}
-                  <div className="sub">板の面（約{Math.round(plateWmm)}×{plateDepth}mm）に自動で収めます</div>
+                  <div className="sub">{plateWidth}×{plateDepth}mmの範囲に自動で収めます</div>
                 </label>
                 {plateUrl && (
-                  <div className="plate-preview" style={{ aspectRatio: `${plateWmm} / ${plateDepth}`, background: TERRAIN_COLOR }}>
+                  <div className="plate-preview" style={{ aspectRatio: `${plateWidth} / ${plateDepth}`, background: TERRAIN_COLOR }}>
                     <img src={plateUrl} alt="銘板プレビュー" />
                   </div>
                 )}
                 <p className="hint">
-                  モデル手前に張り出す板に、SVGの塗り・線がそのまま凸になります。
+                  SVGの外接矩形がそのまま板の形になり、塗り・線が板の上に凸で乗ります。
                   文字はデザインツールで<b>アウトライン化</b>（パスに変換）してください（&lt;text&gt;要素は不可）。
                   実寸0.4mm未満の細線は印刷で潰れます。縮尺や日付は上の縮尺表示を見てSVGに直接入れてください。
+                  板と凸は<b>ひと続きの1オブジェクト</b>（2色）として出力されます。
+                </p>
+                <div className="row presets">
+                  <button className="btn btn-ghost btn-xs" disabled={!bbox} onClick={autoPlacePlate}>
+                    軌跡を避けて配置
+                  </button>
+                  <span className="val">地図の青い枠で ■サイズ・●回転・✥移動</span>
+                </div>
+                <p className="hint">
+                  地形側に長方形の窪みを彫り、そこに厚さ2mmの板をはめ込みます。
+                  凸の天面が周りの地面と同じ高さになるので、地形から飛び出しません
+                  （底面厚が足りない場合は板が薄くなります）。窪みは水平なので、
+                  平坦な場所ほどきれいに収まります。
+                  この枠はSVGを収める範囲で、実際の板はSVGの縦横比に合わせて一回り小さくなります。
                 </p>
                 <div className="row">
-                  <label>板の奥行き（mm）</label>
-                  <input type="number" min={4} max={40} step={1} value={plateDepth} onChange={(e) => setPlateDepth(Number(e.target.value))} />
+                  <label>範囲の幅（mm）</label>
+                  <input type="number" min={PLATE_MIN_MM} max={plateMaxMm} step={1} value={plateWidth} onChange={(e) => setPlateWidth(Number(e.target.value))} />
                 </div>
                 <div className="row">
-                  <label>凸の高さ（mm）</label>
-                  <input type="number" min={0.2} max={2} step={0.1} value={plateRelief} onChange={(e) => setPlateRelief(Number(e.target.value))} />
+                  <label>範囲の奥行き（mm）</label>
+                  <input type="number" min={PLATE_MIN_MM} max={plateMaxMm} step={1} value={plateDepth} onChange={(e) => setPlateDepth(Number(e.target.value))} />
                 </div>
                 <div className="row">
-                  <label>凸部の色</label>
-                  <input type="color" value={labelColor} onChange={(e) => setLabelColor(e.target.value)} />
+                  <label>範囲の回転（°）</label>
+                  <input type="number" step={5} value={plateRotation} onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setPlateRotation(v); }} />
+                </div>
+                <div className="row">
+                  <label>凸の高さ（板から mm）</label>
+                  <input type="number" min={0.2} max={3} step={0.1} value={plateRelief} onChange={(e) => setPlateRelief(Number(e.target.value))} />
                 </div>
               </>
             )}
@@ -753,8 +820,9 @@ export function App() {
               {!file && <div className="overlay-hint"><span>GPXを選択すると地図に軌跡と範囲を表示</span></div>}
               <MapPicker
                 points={mapPts} selection={mapSel} bbox={bbox} shape={shape} rotation={rotation}
-                resizable={locked !== "span"}
+                resizable={locked !== "span"} plate={plateBox}
                 onBboxChange={onBboxChange} onRotationChange={setRotation}
+                onPlateChange={onPlateChange}
               />
             </div>
           </div>

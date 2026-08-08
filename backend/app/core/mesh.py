@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import shapely
 import trimesh
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import binary_dilation, gaussian_filter
 
 from .export import Body
 from .terrain import ElevationGrid
@@ -59,6 +59,10 @@ class Projection:
     def z_of(self, elev):
         return (elev - self.emin) * self.scale * self.vertical_scale
 
+    def elev_of(self, z):
+        """Inverse of z_of: print mm -> the grid's own elevation units."""
+        return self.emin + z / (self.scale * self.vertical_scale)
+
     def sample_z(self, lon, lat):
         """Bilinearly sample terrain z (mm) at arbitrary lon/lat."""
         col = np.interp(lon, self.grid.lons, np.arange(self.grid.lons.size))
@@ -71,6 +75,64 @@ class Projection:
         bot = f[r0 + 1, c0] * (1 - fc) + f[r0 + 1, c0 + 1] * fc
         elev = top * (1 - fr) + bot * fr
         return self.z_of(elev)
+
+    def _window(self, poly: shapely.Polygon):
+        """(rows, cols, elevations) of the grid block a lon/lat footprint hits."""
+        lon0, lat0, lon1, lat1 = poly.bounds
+        c0, c1 = np.searchsorted(self.grid.lons, [lon0, lon1])
+        r0, r1 = np.searchsorted(self.grid.lats, [lat0, lat1])
+        c0, r0 = max(int(c0) - 1, 0), max(int(r0) - 1, 0)
+        return (slice(r0, r1 + 1), slice(c0, c1 + 1),
+                self.grid.lons[c0:c1 + 1], self.grid.lats[r0:r1 + 1])
+
+    def flatten_under(self, poly: shapely.Polygon, z: float) -> None:
+        """Cut a flat-floored pocket at `z` (print mm) under a lon/lat footprint.
+
+        The nameplate is meant to read as a plate let into the map, so the
+        map gets the hole: every grid point the footprint covers drops to one
+        level, and the terrain mesh built afterwards has a flat recess with
+        walls a cell wide. Grid *points* are what move, so the pocket ends up
+        a hair inside the footprint — the plate then overlaps its rim rather
+        than leaving a crack along it.
+        """
+        rows, cols, lons, lats = self._window(poly)
+        block = self.filled[rows, cols]
+        if not block.size:
+            return
+        lon_g, lat_g = np.meshgrid(lons, lats)
+        shapely.prepare(poly)
+        inside = shapely.contains_xy(poly, lon_g, lat_g)
+        if not inside.any():
+            return
+        block[inside] = self.elev_of(z)
+        self.filled[rows, cols] = block
+
+    def z_range_under(self, poly: shapely.Polygon) -> tuple[float, float]:
+        """Lowest and highest terrain z (mm) under a lon/lat footprint.
+
+        Reads the DEM cells the footprint covers rather than sampling points:
+        something embedded in the terrain has to clear every peak beneath it
+        and bite under every dip, not just the ones a sample lands on. The
+        mask is grown by one so the ground between the last cell centre and
+        the footprint edge counts, and the footprint itself is used (not its
+        bounding box) — a turned plaque's box can be twice its area, which on
+        a summit would leave it floating centimetres up.
+        """
+        rows, cols, lons, lats = self._window(poly)
+        sub = self.filled[rows, cols]
+        if sub.size:
+            lon_g, lat_g = np.meshgrid(lons, lats)
+            shapely.prepare(poly)
+            covered = binary_dilation(
+                shapely.contains_xy(poly, lon_g, lat_g), np.ones((3, 3), bool)
+            )
+            if covered.any():
+                cells = sub[covered]
+                return self.z_of(float(cells.min())), self.z_of(float(cells.max()))
+        # Footprint smaller than a cell and clear of every cell centre.
+        c = poly.centroid
+        z = float(self.sample_z(c.x, c.y))
+        return z, z
 
 
 def make_projection(
