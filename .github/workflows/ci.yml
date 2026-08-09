@@ -18,7 +18,7 @@ jobs:
     name: backend (pytest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The same image the app ships in, so the suite runs against the pinned
       # wheels and the CJK font the 出典 stamp needs — exactly what
@@ -38,9 +38,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"        # matches the Dockerfile's build stage
           cache: npm
