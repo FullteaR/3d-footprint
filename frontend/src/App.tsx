@@ -4,6 +4,7 @@ import {
   scaleBbox, spanMeters, type Bbox, type PlateEdit, type Shape,
 } from "./MapPicker";
 import { Preview } from "./Preview";
+import { TEXT, initialLang, localeOf, rememberLang, type Lang, type Text } from "./i18n";
 import "./ui.css";
 
 // 範囲 (real-world span) / 印刷サイズ / 縮尺 are one equation apart
@@ -12,6 +13,16 @@ import "./ui.css";
 // (the default) — then the map frame is the master and the two numbers just
 // describe it, trading off against each other when typed into.
 type Lock = "span" | "size" | "scale";
+
+// What the action bar is saying right now.
+type Status =
+  | { kind: "needFile" | "generating" | "downloading" | "downloaded" }
+  | { kind: "error"; detail: string }
+  | null;
+const STATUS_TEXT = {
+  needFile: "stNeedFile", generating: "stGenerating",
+  downloading: "stDownloading", downloaded: "stDownloaded",
+} as const;
 
 // Number input that commits on blur / Enter — committed values can move the
 // map bbox, so per-keystroke commits (2 → 25 → 250…) would thrash the frame.
@@ -49,11 +60,12 @@ function NumField({ value, min, max, step, digits = 0, disabled, onCommit }: {
 
 // Two overlapping range inputs make one dual-thumb slider: only the thumbs
 // take pointer events, so either one is grabbable even where they overlap.
-function RangeSlider({ min, max, step, value, onChange }: {
+function RangeSlider({ min, max, step, value, labels, onChange }: {
   min: number;
   max: number;
   step: number;
   value: [number, number];
+  labels: [string, string];
   onChange: (v: [number, number]) => void;
 }) {
   const [lo, hi] = value;
@@ -63,11 +75,11 @@ function RangeSlider({ min, max, step, value, onChange }: {
       <span className="rail" />
       <span className="fill" style={{ left: `${pct(lo)}%`, right: `${100 - pct(hi)}%` }} />
       <input
-        type="range" min={min} max={max} step={step} value={lo} aria-label="開始"
+        type="range" min={min} max={max} step={step} value={lo} aria-label={labels[0]}
         onChange={(e) => onChange([Math.min(Number(e.target.value), hi), hi])}
       />
       <input
-        type="range" min={min} max={max} step={step} value={hi} aria-label="終了"
+        type="range" min={min} max={max} step={step} value={hi} aria-label={labels[1]}
         onChange={(e) => onChange([lo, Math.max(Number(e.target.value), lo)])}
       />
     </div>
@@ -81,10 +93,11 @@ const clockText = (sec: number, withDate: boolean) => {
   const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   return withDate ? `${d.getMonth() + 1}/${d.getDate()} ${hm}` : hm;
 };
-const durationText = (sec: number) => {
-  const m = Math.round(sec / 60);
-  return m >= 60 ? `${Math.floor(m / 60)}時間${pad2(m % 60)}分` : `${m}分`;
-};
+
+// A *starred* run in a dictionary string is the one word worth emphasising.
+function rich(s: string) {
+  return s.split("*").map((part, i) => (i % 2 ? <b key={i}>{part}</b> : part));
+}
 
 // Unclassified ground — what the land-use colours sit in, and the nameplate
 // slab (mirrors terrain_color's backend default; no longer user-editable).
@@ -95,9 +108,9 @@ const TERRAIN_COLOR = "#c2b280";
 const PLATE_MIN_MM = 5, PLATE_MAX_MM = 200;
 
 // PLATEAU 土地利用（luse）区分 → 印刷カテゴリ。backend/app/core/coloring.py と対応。
-const LANDUSE_LEGEND: [string, string][] = [
-  ["水面", "#4a80c0"], ["森林・緑地", "#3f7d3a"], ["農地", "#c9d17a"],
-  ["市街地", "#b0b0b0"], ["道路", "#6f6f6f"], ["空地・荒地", "#cdbb8f"],
+const legendOf = (t: Text): [string, string][] => [
+  [t.luWater, "#4a80c0"], [t.luForest, "#3f7d3a"], [t.luFarm, "#c9d17a"],
+  [t.luUrban, "#b0b0b0"], [t.luRoad, "#6f6f6f"], [t.luBare, "#cdbb8f"],
 ];
 
 // Round map scales — the 1/1.5/2/2.5/3/4/5/7.5 ladder per decade, over the
@@ -154,6 +167,8 @@ function BrandMark() {
 // tune every option -> 「3Dモデルを作成する」 generates the GLB preview
 // (server-side, so track height etc. stay exact) -> download as 3MF/STL.
 export function App() {
+  const [lang, setLang] = useState<Lang>(initialLang);
+  const t = TEXT[lang];
   const [health, setHealth] = useState("…");
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -182,7 +197,9 @@ export function App() {
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
   const [fmt, setFmt] = useState("3mf");
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("");
+  // Kept as a key rather than a rendered sentence, so a language switch
+  // re-reads the message too (backend error text passes through as-is).
+  const [status, setStatus] = useState<Status>(null);
   const [glb, setGlb] = useState<ArrayBuffer | null>(null);
   const [bbox, setBbox] = useState<Bbox | null>(null);
   const [shape, setShape] = useState<Shape>("rect");
@@ -239,6 +256,11 @@ export function App() {
   useEffect(() => {
     fetch("/api/health").then((r) => r.json()).then((d) => setHealth(d.status ?? "?")).catch(() => setHealth("unreachable"));
   }, []);
+
+  useEffect(() => {
+    rememberLang(lang);
+    document.documentElement.lang = lang;
+  }, [lang]);
 
   // Parse the GPX in the browser: track polyline for the map, plus the
   // automatic extent (track + 8% margin, in the current shape/rotation) as the
@@ -317,7 +339,7 @@ export function App() {
   const multiDay = !!timeSpan &&
     new Date(timeSpan[0] * 1000).toDateString() !== new Date(timeSpan[1] * 1000).toDateString();
   const startDateText = timeSpan
-    ? new Date(timeSpan[0] * 1000).toLocaleDateString("ja-JP", { year: "numeric", month: "long", day: "numeric" })
+    ? new Date(timeSpan[0] * 1000).toLocaleDateString(localeOf(lang), { year: "numeric", month: "long", day: "numeric" })
     : "";
 
   const spanM = bbox ? spanMeters(bbox, shape) : null;
@@ -408,7 +430,7 @@ export function App() {
   const lockBtn = (item: Lock, disabled = false) => (
     <button
       className={`lock-btn${locked === item ? " on" : ""}`}
-      title={locked === item ? "固定中（クリックで解除）" : "この項目を固定する"}
+      title={locked === item ? t.lockOn : t.lockOff}
       disabled={disabled}
       onClick={() => lockTo(item)}
     >
@@ -467,18 +489,18 @@ export function App() {
   // Generation only runs on the button, not on every tweak.
   async function createModel() {
     if (!file) {
-      setStatus("GPXファイルを選択してください");
+      setStatus({ kind: "needFile" });
       return;
     }
     setBusy(true);
-    setStatus("3Dモデル生成中…");
+    setStatus({ kind: "generating" });
     try {
       const resp = await fetch("/api/generate", { method: "POST", body: buildForm("glb") });
       if (!resp.ok) throw new Error(((await resp.json().catch(() => ({}))) as any).detail ?? `HTTP ${resp.status}`);
       setGlb(await resp.arrayBuffer());
-      setStatus("");
+      setStatus(null);
     } catch (e) {
-      setStatus(`エラー: ${(e as Error).message}`);
+      setStatus({ kind: "error", detail: (e as Error).message });
     } finally {
       setBusy(false);
     }
@@ -486,11 +508,11 @@ export function App() {
 
   async function download() {
     if (!file) {
-      setStatus("GPXファイルを選択してください");
+      setStatus({ kind: "needFile" });
       return;
     }
     setBusy(true);
-    setStatus("生成中…");
+    setStatus({ kind: "downloading" });
     try {
       const resp = await fetch("/api/generate", { method: "POST", body: buildForm(fmt) });
       if (!resp.ok) throw new Error(((await resp.json().catch(() => ({}))) as any).detail ?? `HTTP ${resp.status}`);
@@ -501,9 +523,9 @@ export function App() {
       a.download = `footprint.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
-      setStatus("ダウンロードしました。");
+      setStatus({ kind: "downloaded" });
     } catch (e) {
-      setStatus(`エラー: ${(e as Error).message}`);
+      setStatus({ kind: "error", detail: (e as Error).message });
     } finally {
       setBusy(false);
     }
@@ -523,9 +545,19 @@ export function App() {
           <BrandMark />
           <h1 className="app-title">3D-FOOTPRINT</h1>
         </span>
-        <p className="app-subtitle">GPXの移動軌跡と地形から、3Dプリント用の立体地図をつくる</p>
+        <p className="app-subtitle">{t.subtitle}</p>
+        <span className="lang-switch" role="group" aria-label="Language">
+          {(["ja", "en"] as Lang[]).map((l) => (
+            <button
+              key={l} className={lang === l ? "on" : ""} aria-pressed={lang === l}
+              onClick={() => setLang(l)}
+            >
+              {l === "ja" ? "日本語" : "English"}
+            </button>
+          ))}
+        </span>
         <span className={`health${health === "ok" ? " ok" : ""}`}>
-          <span className="dot" />API {health === "ok" ? "接続中" : health}
+          <span className="dot" />API {health === "ok" ? t.apiOk : health}
         </span>
       </header>
 
@@ -542,19 +574,19 @@ export function App() {
               {file ? (
                 <>
                   <div className="file-name">{file.name}</div>
-                  <div className="sub">クリックまたはドロップで差し替え</div>
+                  <div className="sub">{t.dropReplace}</div>
                 </>
               ) : (
                 <>
-                  <div>GPXファイルをここにドロップ</div>
-                  <div className="sub">またはクリックして選択</div>
+                  <div>{t.dropGpx}</div>
+                  <div className="sub">{t.dropGpxSub}</div>
                 </>
               )}
             </label>
 
             {file && (
               <>
-                <h3 className="section-title">時間範囲</h3>
+                <h3 className="section-title">{t.secTime}</h3>
                 {timeSpan && range ? (
                   <>
                     <div className="row">
@@ -565,44 +597,42 @@ export function App() {
                     </div>
                     <RangeSlider
                       min={timeSpan[0]} max={timeSpan[1]} step={1}
-                      value={range} onChange={setRange}
+                      value={range} labels={[t.rangeStart, t.rangeEnd]} onChange={setRange}
                     />
                     <div className="range-ends">
                       <span>{clockText(timeSpan[0], multiDay)}</span>
                       <span>
-                        選択 {durationText(range[1] - range[0])}
-                        {trimmed && ` / 全体 ${durationText(timeSpan[1] - timeSpan[0])}`}
+                        {t.selected} {t.duration(range[1] - range[0])}
+                        {trimmed && ` / ${t.whole} ${t.duration(timeSpan[1] - timeSpan[0])}`}
                       </span>
                       <span>{clockText(timeSpan[1], multiDay)}</span>
                     </div>
                     <div className="row presets">
                       <button className="btn btn-ghost btn-xs" disabled={!trimmed} onClick={() => setRange(timeSpan)}>
-                        全体に戻す
+                        {t.resetRange}
                       </button>
                     </div>
                   </>
                 ) : (
-                  <p className="hint">
-                    このGPXには時刻情報が無い（またはすべて同じ時刻の）ため、時間範囲は指定できません。軌跡全体を使います。
-                  </p>
+                  <p className="hint">{t.noTimeHint}</p>
                 )}
               </>
             )}
 
-            <h3 className="section-title">大きさ・縮尺</h3>
+            <h3 className="section-title">{t.secSize}</h3>
             <div className="row">
               {lockBtn("span", !bbox)}
-              <label>範囲（実距離）</label>
+              <label>{t.extent}</label>
               <span className="val">{extentText}</span>
             </div>
             <div className="row">
               {lockBtn("size")}
-              <label>印刷サイズ（最大辺 mm）</label>
+              <label>{t.printSize}</label>
               <NumField value={sizeMm} min={SIZE_MIN} max={SIZE_MAX} step={5} digits={1} disabled={locked === "size"} onCommit={commitSize} />
             </div>
             <div className="row">
               {lockBtn("scale", !bbox)}
-              <label>縮尺　1:</label>
+              <label>{t.scale}</label>
               <NumField value={scaleDenom == null ? null : Math.round(scaleDenom)} min={100} max={10000000} step={1000} disabled={!bbox || locked === "scale"} onCommit={commitScale} />
             </div>
             {scaleDenom != null && (
@@ -615,84 +645,75 @@ export function App() {
               </div>
             )}
 
-            <h3 className="section-title">モデル</h3>
+            <h3 className="section-title">{t.secModel}</h3>
             <div className="row">
-              <label>垂直強調<span className="val">×{verticalScale}</span></label>
+              <label>{t.verticalScale}<span className="val">×{verticalScale}</span></label>
               <input type="range" min={1} max={30} step={0.5} value={verticalScale} onChange={(e) => setVerticalScale(Number(e.target.value))} />
             </div>
             <div className="row">
-              <label>底面厚（mm）</label>
+              <label>{t.baseThickness}</label>
               <input type="number" min={0} max={20} step={0.5} value={baseThickness} onChange={(e) => setBaseThickness(Number(e.target.value))} />
             </div>
             <div className="row">
-              <label>解像度（詳細度）</label>
+              <label>{t.resolution}</label>
               <select value={gridMax} onChange={(e) => setGridMax(Number(e.target.value))}>
-                <option value={700}>標準（速い・粗い）</option>
-                <option value={1000}>高</option>
-                <option value={1400}>最高（細かい・重い）</option>
+                <option value={700}>{t.resStandard}</option>
+                <option value={1000}>{t.resHigh}</option>
+                <option value={1400}>{t.resMax}</option>
               </select>
             </div>
 
-            <h3 className="section-title">色・土地利用</h3>
+            <h3 className="section-title">{t.secColor}</h3>
             <div className="row">
-              <label>色の最小サイズ<span className="val">{minColor ? `${minColor}mm` : "なし"}</span></label>
+              <label>{t.minColor}<span className="val">{minColor ? `${minColor}mm` : t.minColorOff}</span></label>
               <input type="range" min={0} max={4} step={0.5} value={minColor} onChange={(e) => setMinColor(Number(e.target.value))} />
             </div>
-            <p className="hint">
-              印刷実寸でこれより小さい色の斑点・細い筋（目安: 幅はこの2/3程度から）を消し、
-              色の境界をなめらかな曲線にします。地形の凹凸の細かさは変わりません。
-              0では元データそのまま（境界がセル単位のギザギザになり、細かい色面は印刷で潰れます）。
-            </p>
+            <p className="hint">{t.minColorHint}</p>
 
-            <h3 className="section-title">軌跡</h3>
+            <h3 className="section-title">{t.secTrack}</h3>
             <div className="row">
-              <label>軌跡を含める</label>
+              <label>{t.includeTrack}</label>
               <input className="toggle" type="checkbox" checked={includeTrack} onChange={(e) => setIncludeTrack(e.target.checked)} />
             </div>
             <div className={`row${includeTrack ? "" : " dim"}`}>
-              <label>軌跡の幅（mm）</label>
+              <label>{t.trackWidth}</label>
               <input type="number" min={0.4} max={10} step={0.1} value={trackWidth} disabled={!includeTrack} onChange={(e) => setTrackWidth(Number(e.target.value))} />
             </div>
             <div className={`row${includeTrack ? "" : " dim"}`}>
-              <label>軌跡の高さ（mm）</label>
+              <label>{t.trackHeight}</label>
               <input type="number" min={0.2} max={10} step={0.1} value={trackHeight} disabled={!includeTrack} onChange={(e) => setTrackHeight(Number(e.target.value))} />
             </div>
             <div className={`row${includeTrack ? "" : " dim"}`}>
-              <label>軌跡の色</label>
+              <label>{t.trackColor}</label>
               <input type="color" value={trackColor} disabled={!includeTrack} onChange={(e) => setTrackColor(e.target.value)} />
             </div>
 
-            <h3 className="section-title">建物・橋</h3>
+            <h3 className="section-title">{t.secBuildings}</h3>
             <div className="row">
-              <label>建物・橋 (PLATEAU LOD2)</label>
+              <label>{t.includeBuildings}</label>
               <input className="toggle" type="checkbox" checked={includeBuildings} onChange={(e) => setIncludeBuildings(e.target.checked)} />
             </div>
             {includeBuildings && (
               <>
-                <p className="hint">
-                  PLATEAU整備済みの都市のみ（LOD2/LOD1）。印刷用に簡略化（建物＝輪郭ブロック化／橋・高架＝デッキ＋脚で地面に接続）。初回はDLに時間がかかります。
-                </p>
+                <p className="hint">{t.buildingsHint}</p>
                 <div className="row">
-                  <label>高さ強調<span className="val">×{buildingScale}</span></label>
+                  <label>{t.buildingScale}<span className="val">×{buildingScale}</span></label>
                   <input type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
                 </div>
                 <div className="row">
-                  <label>最小幅<span className="val">{minFeature}mm</span></label>
+                  <label>{t.minFeature}<span className="val">{minFeature}mm</span></label>
                   <input type="range" min={0.4} max={2} step={0.1} value={minFeature} onChange={(e) => setMinFeature(Number(e.target.value))} />
                 </div>
-                <p className="hint">
-                  ノズル径以下は潰れるため、これより細い建物・橋脚は最小幅まで太らせます（目安: ノズル0.4mmなら0.8）。
-                </p>
                 <div className="row">
-                  <label>建物・橋の色</label>
+                  <label>{t.buildingColor}</label>
                   <input type="color" value={buildingColor} onChange={(e) => setBuildingColor(e.target.value)} />
                 </div>
               </>
             )}
 
-            <h3 className="section-title">銘板</h3>
+            <h3 className="section-title">{t.secPlate}</h3>
             <div className="row">
-              <label>銘板を付ける</label>
+              <label>{t.includePlate}</label>
               <input
                 className="toggle" type="checkbox" checked={includePlate}
                 onChange={(e) => {
@@ -708,48 +729,36 @@ export function App() {
                   {plateSvg ? (
                     <div className="file-name">{plateSvg.name}</div>
                   ) : (
-                    <div>銘板デザインのSVGを選択</div>
+                    <div>{t.plateSvg}</div>
                   )}
-                  <div className="sub">{plateWidth}×{plateDepth}mmの範囲に自動で収めます</div>
+                  <div className="sub">{t.plateFit(plateWidth, plateDepth)}</div>
                 </label>
                 {plateUrl && (
                   <div className="plate-preview" style={{ aspectRatio: `${plateWidth} / ${plateDepth}`, background: TERRAIN_COLOR }}>
-                    <img src={plateUrl} alt="銘板プレビュー" />
+                    <img src={plateUrl} alt={t.platePreview} />
                   </div>
                 )}
-                <p className="hint">
-                  SVGの外接矩形がそのまま板の形になり、塗り・線が板の上に凸で乗ります。
-                  文字はデザインツールで<b>アウトライン化</b>（パスに変換）してください（&lt;text&gt;要素は不可）。
-                  実寸0.4mm未満の細線は印刷で潰れます。縮尺や日付は上の縮尺表示を見てSVGに直接入れてください。
-                  板と凸は<b>ひと続きの1オブジェクト</b>（2色）として出力されます。
-                </p>
+                <p className="hint">{rich(t.plateHint)}</p>
                 <div className="row presets">
                   <button className="btn btn-ghost btn-xs" disabled={!bbox} onClick={autoPlacePlate}>
-                    軌跡を避けて配置
+                    {t.platePlace}
                   </button>
-                  <span className="val">地図の青い枠で ■サイズ・●回転・✥移動</span>
+                  <span className="val">{t.plateHandles}</span>
                 </div>
-                <p className="hint">
-                  地形側に長方形の窪みを彫り、そこに厚さ2mmの板をはめ込みます。
-                  凸の天面が周りの地面と同じ高さになるので、地形から飛び出しません
-                  （底面厚が足りない場合は板が薄くなります）。窪みは水平なので、
-                  平坦な場所ほどきれいに収まります。
-                  この枠はSVGを収める範囲で、実際の板はSVGの縦横比に合わせて一回り小さくなります。
-                </p>
                 <div className="row">
-                  <label>範囲の幅（mm）</label>
+                  <label>{t.plateWidth}</label>
                   <input type="number" min={PLATE_MIN_MM} max={plateMaxMm} step={1} value={plateWidth} onChange={(e) => setPlateWidth(Number(e.target.value))} />
                 </div>
                 <div className="row">
-                  <label>範囲の奥行き（mm）</label>
+                  <label>{t.plateDepth}</label>
                   <input type="number" min={PLATE_MIN_MM} max={plateMaxMm} step={1} value={plateDepth} onChange={(e) => setPlateDepth(Number(e.target.value))} />
                 </div>
                 <div className="row">
-                  <label>範囲の回転（°）</label>
+                  <label>{t.plateRotation}</label>
                   <input type="number" step={5} value={plateRotation} onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setPlateRotation(v); }} />
                 </div>
                 <div className="row">
-                  <label>凸の高さ（板から mm）</label>
+                  <label>{t.plateRelief}</label>
                   <input type="number" min={0.2} max={3} step={0.1} value={plateRelief} onChange={(e) => setPlateRelief(Number(e.target.value))} />
                 </div>
               </>
@@ -760,35 +769,41 @@ export function App() {
           <div className="panel-actions">
             <button className="btn btn-primary btn-block" onClick={createModel} disabled={busy || !file}>
               {busy && <span className="spinner" />}
-              3Dモデルを作成する
+              {t.create}
             </button>
 
             <div className="row" style={{ marginTop: 6 }}>
-              <label>フォーマット</label>
+              <label>{t.format}</label>
               <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
-                <option value="3mf">3MF（多色・単一ファイル）</option>
-                <option value="stl_multi">STL（多色・色ごと分割ZIP）</option>
-                <option value="stl">STL（単色）</option>
+                <option value="3mf">{t.fmt3mf}</option>
+                <option value="stl_multi">{t.fmtStlMulti}</option>
+                <option value="stl">{t.fmtStl}</option>
               </select>
             </div>
             <button className="btn btn-secondary btn-block" onClick={download} disabled={busy || !file}>
-              生成してダウンロード
+              {t.download}
             </button>
-            {status && <p className={`status${status.startsWith("エラー") ? " error" : ""}`}>{status}</p>}
+            {status && (
+              <p className={`status${status.kind === "error" ? " error" : ""}`}>
+                {status.kind === "error"
+                  ? `${t.errorPrefix}${status.detail}`
+                  : t[STATUS_TEXT[status.kind]]}
+              </p>
+            )}
           </div>
         </div>
 
         <div className="stack">
           <div className="card map-card">
             <div className="card-head">
-              <strong>モデル化する範囲</strong>
+              <strong>{t.mapTitle}</strong>
               <select value={shape} onChange={(e) => onShapeChange(e.target.value as Shape)}>
-                <option value="rect">長方形</option>
-                <option value="square">正方形</option>
-                <option value="hex">正六角形</option>
+                <option value="rect">{t.shapeRect}</option>
+                <option value="square">{t.shapeSquare}</option>
+                <option value="hex">{t.shapeHex}</option>
               </select>
               <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                回転
+                {t.rotation}
                 <input
                   type="number" step={5} value={rotation} style={{ width: 62 }}
                   onChange={(e) => {
@@ -797,10 +812,10 @@ export function App() {
                   }}
                 />°
               </label>
-              <span>{locked === "span" ? "●回転・✥移動（実距離を固定中）" : "■サイズ・●回転・✥移動"}</span>
+              <span>{locked === "span" ? t.handlesLocked : t.handles}</span>
               {bbox && (
                 <span className="coords">
-                  中心 {(((bbox[1] + bbox[3]) / 2)).toFixed(4)}, {(((bbox[0] + bbox[2]) / 2)).toFixed(4)}
+                  {t.center} {(((bbox[1] + bbox[3]) / 2)).toFixed(4)}, {(((bbox[0] + bbox[2]) / 2)).toFixed(4)}
                 </span>
               )}
               <span style={{ flex: 1 }} />
@@ -813,11 +828,11 @@ export function App() {
                 }}
                 disabled={!selPts.length}
               >
-                {locked === "span" ? "軌跡の中心へ" : "軌跡に合わせる"}
+                {locked === "span" ? t.centerTrack : t.fitTrack}
               </button>
             </div>
             <div className="card-body map-box">
-              {!file && <div className="overlay-hint"><span>GPXを選択すると地図に軌跡と範囲を表示</span></div>}
+              {!file && <div className="overlay-hint"><span>{t.mapEmpty}</span></div>}
               <MapPicker
                 points={mapPts} selection={mapSel} bbox={bbox} shape={shape} rotation={rotation}
                 resizable={locked !== "span"} plate={plateBox}
@@ -829,15 +844,15 @@ export function App() {
 
           <div className="card preview-card">
             <div className="card-head">
-              <strong>3Dプレビュー</strong>
-              <span>ドラッグで回転・ホイールで拡大</span>
+              <strong>{t.previewTitle}</strong>
+              <span>{t.previewHelp}</span>
             </div>
             <div className="card-body preview-box">
-              {!glb && <div className="overlay-hint"><span>「3Dモデルを作成する」を押すとここにプレビュー</span></div>}
-              {busy && <div className="busy-badge"><span className="spinner" />生成中…</div>}
+              {!glb && <div className="overlay-hint"><span>{t.previewEmpty}</span></div>}
+              {busy && <div className="busy-badge"><span className="spinner" />{t.busy}</div>}
               {glb && (
                 <div className="preview-legend">
-                  {LANDUSE_LEGEND.map(([name, c]) => (
+                  {legendOf(t).map(([name, c]) => (
                     <span key={name}><i style={{ background: c }} />{name}</span>
                   ))}
                 </div>
@@ -849,11 +864,14 @@ export function App() {
       </div>
 
       <footer className="credits">
-        データ出典:{" "}
-        <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noreferrer">国土地理院（地理院タイル）</a>・
-        <a href="https://www.mlit.go.jp/plateau/" target="_blank" rel="noreferrer">国土交通省 Project PLATEAU</a>・
-        <a href="https://www.eorc.jaxa.jp/ALOS/jp/dataset/lulc_j.htm" target="_blank" rel="noreferrer">JAXA 高解像度土地利用土地被覆図</a>・
-        地図表示 © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors
+        {t.credits}{" "}
+        <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noreferrer">{t.gsi}</a>
+        {t.creditSep}
+        <a href="https://www.mlit.go.jp/plateau/" target="_blank" rel="noreferrer">{t.plateau}</a>
+        {t.creditSep}
+        <a href="https://www.eorc.jaxa.jp/ALOS/jp/dataset/lulc_j.htm" target="_blank" rel="noreferrer">{t.jaxa}</a>
+        {t.creditSep}
+        {t.osm} <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>{t.osmSuffix}
       </footer>
     </main>
   );
