@@ -1,6 +1,10 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      # Explicit, because the test stage below is the Dockerfile's last one
+      # and an untargeted build would take that instead.
+      target: runtime
     ports:
       - "8000:8000"
     volumes:
@@ -9,3 +13,22 @@ services:
     environment:
       - DATA_DIR=/app/data
       - STATIC_DIR=/app/static
+
+  # `docker compose run --rm test` — the backend suite, in the runtime image.
+  # Sources are mounted, so a re-run picks up edits without a rebuild; the
+  # profile keeps it out of `docker compose up`.
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    # No network at all: a test that quietly reached for a DEM tile or a
+    # PLATEAU catalog would fail here instead of turning slow and flaky.
+    network_mode: "none"
+    environment:
+      # Nor the real cache, for the same reason.
+      - DATA_DIR=/tmp/3dfp-test-data
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/tests:/app/tests
+      - ./backend/pytest.ini:/app/pytest.ini

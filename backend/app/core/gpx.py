@@ -44,7 +44,13 @@ def parse_gpx(data: bytes) -> Track:
     Falls back to <rtept>/<wpt> when no <trkpt> is present so that route- or
     waypoint-style files still produce a path.
     """
-    root = etree.fromstring(data)
+    try:
+        root = etree.fromstring(data)
+    except etree.LxmlError as e:
+        # Not a ValueError on its own (it derives from SyntaxError), so the
+        # route would answer a mistyped upload with a 500 instead of the
+        # message the user needs.
+        raise ValueError(f"GPX could not be parsed as XML: {e}")
 
     for tag in ("trkpt", "rtept", "wpt"):
         pts = root.findall(f".//{{*}}{tag}")

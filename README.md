@@ -53,6 +53,23 @@ npm install
 npm run dev      # → http://localhost:5173
 ```
 
+## テスト
+
+バックエンド（pytest / ランタイムと同じイメージで実行、ネットワーク不要）:
+
+```bash
+docker compose run --rm test
+```
+
+DEMと土地利用は合成配列に差し替えているので、ダウンロードは一切発生しません。
+`backend/` はマウントされるため、テストを直したら再ビルドなしで再実行できます。
+
+フロントエンド（vitest / jsdom）:
+
+```bash
+cd frontend && npm test
+```
+
 ## ステータス
 
 - **M1** 雛形＋Docker一発起動 ← 現在

@@ -29,3 +29,14 @@ ENV STATIC_DIR=/app/static \
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# --- Stage 3: the same runtime, plus the test dependencies ---
+# The suite runs against the image it ships in — same pinned wheels, same CJK
+# font the 出典 stamp needs — and never touches the network. docker-compose's
+# `test` service mounts backend/ over this, so editing a test needs no rebuild.
+FROM runtime AS test
+COPY backend/requirements-dev.txt backend/pytest.ini ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY backend/tests ./tests
+ENV DATA_DIR=/tmp/3dfp-test-data
+CMD ["python", "-m", "pytest"]
