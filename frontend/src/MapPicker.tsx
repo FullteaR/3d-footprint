@@ -255,14 +255,20 @@ function rotHandleXY(g: Geo): [number, number] {
 const TRACK_STYLE: L.PolylineOptions = { color: "#dc4628", weight: 3, opacity: 1 };
 const OUT_OF_RANGE_STYLE: L.PolylineOptions = { color: "#7d8794", weight: 2, opacity: 0.5 };
 
+// Corner handles, in order: SW, SE, NE, NW. Opposite corner = (i + 2) % 4,
+// which is the anchor a resize drag keeps fixed.
+const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const;
+const cursorAt = (sx: number, sy: number) =>
+  sx === sy ? "nesw-resize" : "nwse-resize"; // map y is north, screen y is down
+
 // Handle icons as plain divs (Leaflet's default marker PNGs don't survive
 // bundling, and we want dedicated resize/rotate/move affordances anyway).
-const cornerIcon = L.divIcon({
+const cornerIcons = CORNERS.map(([sx, sy]) => L.divIcon({
   className: "",
-  html: '<div style="width:14px;height:14px;background:#fff;border:2px solid #d33;border-radius:3px;box-shadow:0 1px 3px #0006;cursor:nwse-resize"></div>',
+  html: `<div style="width:14px;height:14px;background:#fff;border:2px solid #d33;border-radius:3px;box-shadow:0 1px 3px #0006;cursor:${cursorAt(sx, sy)}"></div>`,
   iconSize: [14, 14],
   iconAnchor: [7, 7],
-});
+}));
 const rotateIcon = L.divIcon({
   className: "",
   html: '<div style="width:16px;height:16px;background:#fff;border:2px solid #d33;border-radius:50%;box-shadow:0 1px 3px #0006;cursor:grab"></div>',
@@ -283,12 +289,12 @@ const plateIcon = L.divIcon({
   iconSize: [20, 20],
   iconAnchor: [10, 10],
 });
-const plateCornerIcon = L.divIcon({
+const plateCornerIcons = CORNERS.map(([sx, sy]) => L.divIcon({
   className: "",
-  html: `<div style="width:12px;height:12px;background:#fff;border:2px solid ${PLATE_COLOR};border-radius:2px;box-shadow:0 1px 3px #0006;cursor:nwse-resize"></div>`,
+  html: `<div style="width:12px;height:12px;background:#fff;border:2px solid ${PLATE_COLOR};border-radius:2px;box-shadow:0 1px 3px #0006;cursor:${cursorAt(sx, sy)}"></div>`,
   iconSize: [12, 12],
   iconAnchor: [6, 6],
-});
+}));
 const plateRotateIcon = L.divIcon({
   className: "",
   html: `<div style="width:14px;height:14px;background:#fff;border:2px solid ${PLATE_COLOR};border-radius:50%;box-shadow:0 1px 3px #0006;cursor:grab"></div>`,
@@ -304,10 +310,10 @@ export type PlateEdit = {
 };
 
 // OSM slippy map showing the GPX track, with the model outline (rect / square /
-// regular hexagon, rotatable) the user edits with three handles: corner ■ =
-// resize, ● above the top edge = rotate, centre ✥ = move. The nameplate
-// footprint carries the same three handles in blue — the track is right there
-// to place it clear of.
+// regular hexagon, rotatable) the user edits with three kinds of handle: ■ on
+// each of the four corners = resize (the opposite corner stays put), ● above
+// the top edge = rotate, centre ✥ = move. The nameplate footprint carries the
+// same handles in blue — the track is right there to place it clear of.
 export function MapPicker({ points, selection = null, bbox, shape, rotation, resizable = true, plate = null, onBboxChange, onRotationChange, onPlateChange }: {
   points: [number, number][]; // [lat, lon] in track order
   selection?: [number, number][] | null; // in-time-range part, null = all of it
@@ -327,15 +333,13 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
   const outlineRef = useRef<L.Polygon>();
   const frameRef = useRef<L.Polygon>();   // dashed bbox, shown for hex
   const tetherRef = useRef<L.Polyline>(); // top edge -> rotate handle
-  const swRef = useRef<L.Marker>();
-  const neRef = useRef<L.Marker>();
+  const cornerRefs = useRef<L.Marker[]>([]);   // SW, SE, NE, NW
   const mvRef = useRef<L.Marker>();
   const rotMarkRef = useRef<L.Marker>();
   const plateBoxRef = useRef<L.Polygon>();
   const plateTetherRef = useRef<L.Polyline>();
   const plateMkRef = useRef<L.Marker>();
-  const plateSwRef = useRef<L.Marker>();
-  const plateNeRef = useRef<L.Marker>();
+  const plateCornerRefs = useRef<L.Marker[]>([]);
   const plateRotRef = useRef<L.Marker>();
 
   // Latest values for use inside Leaflet event handlers.
@@ -403,8 +407,8 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
     const place = (m: L.Marker | undefined, pos: L.LatLngTuple) => {
       if (m && m !== skip) m.setLatLng(pos);
     };
-    place(swRef.current, ll(g, -g.hw, -g.hh, th));
-    place(neRef.current, ll(g, g.hw, g.hh, th));
+    CORNERS.forEach(([sx, sy], i) =>
+      place(cornerRefs.current[i], ll(g, sx * g.hw, sy * g.hh, th)));
     place(mvRef.current, [g.clat, g.clon]);
     place(rotMarkRef.current, ll(g, rx, ry, th));
   }
@@ -458,7 +462,9 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
         ref.current?.remove();
         ref.current = undefined;
       }
-      for (const ref of [swRef, neRef, mvRef, rotMarkRef] as const) {
+      for (const m of cornerRefs.current) m.remove();
+      cornerRefs.current = [];
+      for (const ref of [mvRef, rotMarkRef] as const) {
         ref.current?.remove();
         ref.current = undefined;
       }
@@ -476,8 +482,7 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
       }).addTo(map);
       const mk = (icon: L.DivIcon) =>
         L.marker([0, 0], { icon, draggable: true, autoPan: true }).addTo(map);
-      swRef.current = mk(cornerIcon);
-      neRef.current = mk(cornerIcon);
+      cornerRefs.current = cornerIcons.map(mk);
       mvRef.current = mk(moveIcon);
       rotMarkRef.current = mk(rotateIcon);
 
@@ -496,8 +501,8 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
           if (r.deg !== undefined) cbRotRef.current(r.deg);
         });
       };
-      wire(swRef.current, () => ({ bb: resizeTo(swRef.current!, neRef.current!) }));
-      wire(neRef.current, () => ({ bb: resizeTo(neRef.current!, swRef.current!) }));
+      cornerRefs.current.forEach((m, i) =>
+        wire(m, () => ({ bb: resizeTo(m, cornerRefs.current[(i + 2) % 4]) })));
       wire(mvRef.current, () => ({ bb: moveTo() }));
       wire(rotMarkRef.current, () => ({ deg: rotateTo() }));
     }
@@ -517,8 +522,8 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
       if (m && m !== skip) m.setLatLng(pos);
     };
     place(plateMkRef.current, p.center);
-    place(plateSwRef.current, at(-hw, -hh));
-    place(plateNeRef.current, at(hw, hh));
+    CORNERS.forEach(([sx, sy], i) =>
+      place(plateCornerRefs.current[i], at(sx * hw, sy * hh)));
     place(plateRotRef.current, at(0, reach));
   }
 
@@ -571,7 +576,9 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
       for (const ref of [plateBoxRef, plateTetherRef] as const) {
         ref.current?.remove(); ref.current = undefined;
       }
-      for (const ref of [plateMkRef, plateSwRef, plateNeRef, plateRotRef] as const) {
+      for (const m of plateCornerRefs.current) m.remove();
+      plateCornerRefs.current = [];
+      for (const ref of [plateMkRef, plateRotRef] as const) {
         ref.current?.remove(); ref.current = undefined;
       }
       return;
@@ -586,8 +593,7 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
       const mk = (icon: L.DivIcon) =>
         L.marker([0, 0], { icon, draggable: true, autoPan: true }).addTo(map);
       plateMkRef.current = mk(plateIcon);
-      plateSwRef.current = mk(plateCornerIcon);
-      plateNeRef.current = mk(plateCornerIcon);
+      plateCornerRefs.current = plateCornerIcons.map(mk);
       plateRotRef.current = mk(plateRotateIcon);
 
       const wire = (m: L.Marker, calc: () => PlateEdit) => {
@@ -603,8 +609,8 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
         const p = plateMkRef.current!.getLatLng();
         return { center: [p.lat, p.lng] };
       });
-      wire(plateSwRef.current, () => plateResize(plateSwRef.current!, plateNeRef.current!));
-      wire(plateNeRef.current, () => plateResize(plateNeRef.current!, plateSwRef.current!));
+      plateCornerRefs.current.forEach((m, i) =>
+        wire(m, () => plateResize(m, plateCornerRefs.current[(i + 2) % 4])));
       wire(plateRotRef.current, plateRotate);
     }
     redrawPlate(plate);
@@ -614,8 +620,7 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
   // locked the frame can only pan and rotate. (bbox dep: the markers are
   // created just above once the first bbox arrives.)
   useEffect(() => {
-    for (const m of [swRef.current, neRef.current]) {
-      if (!m) continue;
+    for (const m of cornerRefs.current) {
       if (resizable) { m.dragging?.enable(); m.setOpacity(1); }
       else { m.dragging?.disable(); m.setOpacity(0.3); }
     }
