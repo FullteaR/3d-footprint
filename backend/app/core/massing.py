@@ -6,6 +6,13 @@ geometry we reduce each feature to a clean, watertight *footprint prism* — its
 outline extruded between two heights — while enforcing a minimum printable
 feature width so nothing is left thinner than the nozzle can resolve.
 
+Two paths, differing in what they do with a feature *smaller* than that width.
+A bridge goes through `printable`, which drops it as noise — a stray speck of
+deck is not a bridge. A building cannot: below about 1:20,000 nearly every real
+building is smaller than one nozzle square, so dropping them would leave an
+empty city. Buildings instead go through `outline_parts` and are made printable
+only once `blocks_of` has merged them with their neighbours (see buildings.py).
+
 The 2D footprint algebra (union / simplify / buffer / contains) uses shapely;
 the prism is built with the same earcut + mirror-base + perimeter-wall pattern
 the terrain and building pipelines already use (`mesh.terrain_solid`,
@@ -42,11 +49,71 @@ def footprint_of(xy: np.ndarray, faces: np.ndarray):
     return fp if not fp.is_empty else None
 
 
-def _polygon_parts(geom) -> list:
+def polygon_parts(geom) -> list:
     """The polygonal parts of any geometry (a clip can also yield lines/points)."""
     if isinstance(geom, Polygon):
         return [geom] if not geom.is_empty and geom.area > 0 else []
-    return [p for g in getattr(geom, "geoms", []) for p in _polygon_parts(g)]
+    return [p for g in getattr(geom, "geoms", []) for p in polygon_parts(g)]
+
+
+def _shaped(poly: Polygon, h: float) -> Polygon:
+    """Drop sub-nozzle detail: simplify, then close (dilate then erode).
+
+    mitre joins keep building corners square (blocky) rather than rounding them.
+    """
+    poly = poly.simplify(h, preserve_topology=True)
+    return poly.buffer(h, join_style="mitre", mitre_limit=2.0).buffer(
+        -h, join_style="mitre", mitre_limit=2.0
+    )
+
+
+def _widened(poly: Polygon, h: float) -> Polygon:
+    """Grow a polygon that is thinner than the nozzle *everywhere* out to it."""
+    if poly.buffer(-h).is_empty:
+        return poly.buffer(h, join_style="mitre", mitre_limit=2.0)
+    return poly
+
+
+def outline_parts(geom, min_feature: float) -> list:
+    """A footprint's separate parts, with wiggle finer than the nozzle removed.
+
+    The building path's first step, and deliberately the *only* thing done to a
+    building on its own: it is neither dropped for being small nor grown to
+    printable width where it stands. At city-model scale one nozzle width can be
+    a hundred metres of ground, so growing each building in place fuses it with
+    everything across the street — that is what flattens a low-rise ward into a
+    slab. A building is left at its true size here and made printable as part of
+    the block it merges into (`blocks_of`).
+    """
+    if geom is None or geom.is_empty:
+        return []
+    return polygon_parts(geom.simplify(0.5 * min_feature, preserve_topology=True))
+
+
+def blocks_of(polys, min_feature: float) -> list:
+    """Merge footprints into city blocks, keeping the streets that can print.
+
+    A morphological *closing* at the nozzle radius: dilate every footprint by
+    half `min_feature`, union, then erode the union by the same amount. The
+    dilation is what fuses neighbours — anything closer than one nozzle width
+    becomes a single polygon and stays one, which is how alleys and lot lines
+    disappear. The erosion is what gives the streets back: a gap too wide to be
+    bridged reopens at its **true** width, where a bare dilation would leave it
+    narrowed by a whole nozzle and print as a crack, or as nothing.
+
+    So the line between a street and an alley is not a matter of taste — it is
+    exactly the width the nozzle can lay down. Whatever is wider survives.
+
+    Blocks that come out thinner than the nozzle everywhere are then grown out
+    to it, so a lone house on its own plot is still printable.
+    """
+    polys = np.asarray(polys, dtype=object)
+    if len(polys) == 0:
+        return []
+    h = 0.5 * min_feature
+    grown = shapely.buffer(polys, h, join_style="mitre", mitre_limit=2.0)
+    closed = shapely.union_all(grown).buffer(-h, join_style="mitre", mitre_limit=2.0)
+    return [_widened(p, h) for p in polygon_parts(closed)]
 
 
 def printable(geom, min_feature: float, clip: Polygon | None = None):
@@ -68,23 +135,17 @@ def printable(geom, min_feature: float, clip: Polygon | None = None):
     h = 0.5 * min_feature
     out = []
     for poly in getattr(geom, "geoms", [geom]):
-        poly = poly.simplify(h, preserve_topology=True)
-        # close: merge the feature's own sub-parts and erase notches narrower
-        # than the nozzle. mitre joins keep building corners square (blocky).
-        poly = poly.buffer(h, join_style="mitre", mitre_limit=2.0).buffer(
-            -h, join_style="mitre", mitre_limit=2.0
-        )
+        poly = _shaped(poly, h)
         if poly.is_empty or poly.area < min_feature * min_feature:
             continue                                  # sub-feature noise
-        if poly.buffer(-h).is_empty:                  # thinner than min everywhere
-            poly = poly.buffer(h, join_style="mitre", mitre_limit=2.0)
+        poly = _widened(poly, h)
         if clip is None:
-            out.extend(_polygon_parts(poly))
+            out.extend(polygon_parts(poly))
             continue
         # Cut flush with the model edge. A feature that only grazes the outline
         # is left as an unprintable nub hanging off it, so hold what survives the
         # cut to the same noise floor as the uncut footprint above.
-        out.extend(p for p in _polygon_parts(poly.intersection(clip))
+        out.extend(p for p in polygon_parts(poly.intersection(clip))
                    if p.area >= min_feature * min_feature)
     if not out:
         return None

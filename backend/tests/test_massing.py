@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from shapely.geometry import MultiPolygon, Polygon, box
 
-from app.core.massing import footprint_of, printable, prism
+from app.core.massing import blocks_of, footprint_of, outline_parts, printable, prism
 
 MIN = 0.8   # a 0.4 mm nozzle's minimum printable width
 
@@ -98,6 +98,80 @@ def test_a_feature_that_only_grazes_the_outline_is_dropped():
 def test_nothing_at_all_stays_nothing():
     assert printable(None, MIN) is None
     assert printable(Polygon(), MIN) is None
+
+
+# ---- outlines (the building path) ------------------------------------------
+
+def test_a_building_is_left_at_its_true_size():
+    """Where `printable` sees noise and the old code saw something to fatten,
+    the building path sees a whole building and touches neither its size nor
+    its position — growing it here is what would pave over its street."""
+    speck = box(0.0, 0.0, 0.3, 0.3)
+    assert printable(speck, MIN) is None                  # the bridge rule
+    (out,) = outline_parts(speck, MIN)
+    assert out.area == pytest.approx(0.09)
+
+
+def test_detail_finer_than_the_nozzle_is_taken_out_of_an_outline():
+    """A 0.1 mm jog in a wall cannot print; carrying its vertices through the
+    merge below only makes the union slower."""
+    jogged = Polygon([(0, 0), (5, 0), (5, 0.1), (10, 0.1), (10, 5), (0, 5)])
+    (out,) = outline_parts(jogged, MIN)
+    assert len(out.exterior.coords) < len(jogged.exterior.coords)
+    assert out.area == pytest.approx(50.0, rel=0.02)
+
+
+def test_each_part_of_a_split_building_is_returned_on_its_own():
+    """Two detached wings are two footprints, so each can join its own block."""
+    wings = MultiPolygon([box(0.0, 0.0, 4.0, 4.0), box(40.0, 0.0, 44.0, 4.0)])
+    assert len(outline_parts(wings, MIN)) == 2
+
+
+def test_no_footprint_at_all_is_no_outline():
+    assert outline_parts(None, MIN) == []
+    assert outline_parts(Polygon(), MIN) == []
+
+
+# ---- city blocks -----------------------------------------------------------
+
+def test_an_alley_narrower_than_the_nozzle_is_paved_over():
+    """Lot lines and 路地 are below the nozzle: the two sides fuse into one
+    block, and no erosion reopens what genuinely overlapped."""
+    near = [box(0.0, 0.0, 10.0, 10.0), box(10.0 + 0.5 * MIN, 0.0, 20.0, 10.0)]
+    assert len(blocks_of(near, MIN)) == 1
+
+
+def test_a_street_wider_than_the_nozzle_keeps_its_true_width():
+    """The reason a low-rise ward printed as one flat slab. Merging by growing
+    footprints narrows every gap that survives by a whole nozzle width, so a
+    real road came out a crack; the closing hands it back at full width."""
+    apart = [box(0.0, 0.0, 10.0, 10.0), box(10.0 + 3 * MIN, 0.0, 20.0, 10.0)]
+    west, east = sorted(blocks_of(apart, MIN), key=lambda p: p.bounds[0])
+    assert east.bounds[0] - west.bounds[2] == pytest.approx(3 * MIN, rel=0.02)
+
+
+def test_a_courtyard_narrower_than_the_nozzle_is_filled_in():
+    ring_geom = box(0.0, 0.0, 10.0, 10.0).difference(box(5.0, 5.0, 5.0 + 0.5 * MIN, 6.0))
+    (block,) = blocks_of([ring_geom], MIN)
+    assert block.area == pytest.approx(100.0, rel=0.02)
+
+
+def test_a_lone_house_is_grown_until_it_can_print():
+    """Nothing is dropped for being small, so the one thing with no neighbours
+    to merge with has to be made printable on its own."""
+    speck = box(0.0, 0.0, 0.3, 0.3)
+    (block,) = blocks_of([speck], MIN)
+    x0, y0, x1, y1 = block.bounds
+    assert min(x1 - x0, y1 - y0) >= MIN - 1e-9
+
+
+def test_a_fat_block_is_not_grown():
+    fat = box(0.0, 0.0, 20.0, 10.0)
+    assert blocks_of([fat], MIN)[0].area == pytest.approx(fat.area, rel=0.02)
+
+
+def test_no_footprints_at_all_is_no_blocks():
+    assert blocks_of([], MIN) == []
 
 
 # ---- prisms ----------------------------------------------------------------

@@ -10,14 +10,27 @@ Each building's best available LOD (LOD2 semantic surfaces
 `bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}`, else the LOD1
 `bldg:lod1Solid` prism) is parsed once and cached. For printing, fine roof/wall
 detail is below the FDM nozzle and would collapse, so `building_body` does NOT
-print the raw geometry: it reduces each building to its **footprint** (the union
-of its triangles in plan) extruded to a clean block — its real height x a
-`height_scale` knob (with a floor so short buildings still read) and a minimum
-printable width `min_feature_mm` so thin ones survive instead of vanishing (the
-massing happens in massing.py). All faces share a single "building" colour; the
-block base is embedded so it fuses to the terrain surface, and every block is
-trimmed to the model outline — one that straddles the edge is cut flush with it
-rather than dropped, and none overhangs the printed edge.
+print the raw geometry: each building is reduced to its **footprint** (the union
+of its triangles in plan) and the footprints are merged into **city blocks** —
+anything closer together than the minimum printable width `min_feature_mm`
+becomes one flat-topped prism, and anything further apart stays a gap, so the
+streets wide enough to print survive as streets (the massing is in massing.py).
+
+Blocks, not individual buildings, because the scale demands it: a whole city on
+a 120 mm plate is around 1:100,000, where one nozzle width is ~80 m of ground
+and a typical Tokyo building (~60 m² footprint) is 1/100 of a printable speck.
+Printing them separately is impossible — either they are dropped and the city
+vanishes, or they are grown and overlap anyway. Merging is what an architect's
+massing model of a city does, and it costs hundreds of prisms instead of tens
+of thousands. Merging is confined to a height class (HEIGHT_CLASSES_M) so a
+tower is not averaged away into the low-rise crust it stands in; a block's
+height is the footprint-weighted mean of its members x a `height_scale` knob,
+with a floor so short blocks still read.
+
+All faces share a single "building" colour; a block's base is embedded so it
+fuses to the terrain surface, and every block is trimmed to the model outline —
+one that straddles the edge is cut flush with it rather than dropped, and none
+overhangs the printed edge.
 
 Polygons (lat/lon/height, EPSG 6697; height is 標高 T.P., same datum as the
 GSI DEM) are triangulated once and cached per mesh as a compact npz in
@@ -42,12 +55,17 @@ from .export import Body
 from .net import atomic_savez, session
 from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
-from .massing import footprint_of, printable, prism
+from .massing import blocks_of, footprint_of, outline_parts, polygon_parts, prism
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
 EMBED_MM = 0.5            # how far building block bases sink into the terrain
 MIN_H_MM = 0.6           # minimum block height so even short buildings read
+# Touching footprints merge into one block only within a height class, so a
+# tower keeps its own block instead of being averaged into the low-rise crust
+# around it. The breaks are the usual Japanese massing classes: 低層 (~3階),
+# 中層, the old 31 m absolute height limit, and 超高層 (60 m and 120 m).
+HEIGHT_CLASSES_M = (12.0, 31.0, 60.0, 120.0)
 
 _BLDG_NS = "http://www.opengis.net/citygml/building/2.0"
 _GML_NS = "http://www.opengis.net/gml"
@@ -252,15 +270,17 @@ class PlateauBuildingProvider:
         min_feature_mm: float = 0.8,
         clip: shapely.Polygon | None = None,
     ) -> Body | None:
-        """One Body of every covered building, massed as footprint blocks.
+        """One Body of every covered building, massed into city blocks.
 
         Each building is reduced to its footprint (the union of its triangles in
-        plan) extruded to a clean block on the terrain. `height_scale` exaggerates
-        block height (1.0 = real-world proportion); `min_feature_mm` is the minimum
-        printable width, so thin buildings are thickened rather than lost. Blocks
-        are cut flush with the print outline, so the model edge reads as one clean
-        slice through the city. `clip` (print mm) replaces the grid rectangle as
-        that outline when the model is a rotated rect / hexagon.
+        plan); no building is ever lost for being small. Footprints closer than
+        `min_feature_mm`, the minimum printable width, merge into one flat-topped
+        block per height class, and any street wider than that stays a street
+        rather than being paved over. `height_scale` exaggerates block height
+        (1.0 = real-world proportion). Blocks are cut flush with the print
+        outline, so the model edge reads as one clean slice through the city.
+        `clip` (print mm) replaces the grid rectangle as that outline when the
+        model is a rotated rect / hexagon.
         """
         grid = proj.grid
         bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
@@ -342,21 +362,36 @@ class PlateauBuildingProvider:
         faces_s = faces[order]
         bounds = np.searchsorted(face_bid[order], np.arange(nb + 1))
 
-        meshes = []
+        # One footprint part per building, at its true size (a building modelled
+        # as two detached wings contributes both, so each joins its own block).
+        parts, cls, heights, surf = [], [], [], []
         for b in range(nb):
             if not keep_b[b]:
                 continue
-            fp = printable(
-                footprint_of(xy, faces_s[bounds[b]:bounds[b + 1]]), min_feature_mm, clip
-            )
-            if fp is None:
+            fp = footprint_of(xy, faces_s[bounds[b]:bounds[b + 1]])
+            outline = outline_parts(fp, min_feature_mm)
+            if not outline:
                 continue
+            real_h = max(float(top[b] - ground[b]), 0.0)
             # Real height x exaggeration, floored so short blocks still read.
-            height = max(
-                (top[b] - ground[b]) * proj.scale * height_scale, MIN_H_MM, min_feature_mm
-            )
-            zb = float(surface[b]) - EMBED_MM
-            block = prism(fp, zb, zb + height)
+            # Only MIN_H_MM floors it: `min_feature_mm` is a *width* — the
+            # nozzle — while height is resolved in layers, and flooring by it
+            # would flatten the whole skyline to one slab at wide scales, which
+            # is the one thing the block model is there to show.
+            height = max(real_h * proj.scale * height_scale, MIN_H_MM)
+            for poly in outline:
+                parts.append(poly)
+                cls.append(int(np.digitize(real_h, HEIGHT_CLASSES_M)))
+                heights.append(height)
+                surf.append(float(surface[b]))
+        if not parts:
+            return None
+
+        meshes = []
+        for poly, z_bottom, z_top in _blocks(
+            parts, np.array(cls), np.array(heights), np.array(surf), min_feature_mm, clip
+        ):
+            block = prism(poly, z_bottom, z_top)
             if block is not None:
                 meshes.append(block)
         if not meshes:
@@ -364,3 +399,65 @@ class PlateauBuildingProvider:
 
         mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         return Body(mesh, "building")
+
+
+def _blocks(parts, cls, heights, surf, min_feature_mm, clip):
+    """Merge neighbouring footprints into city blocks; (polygon, z0, z1) in mm.
+
+    `blocks_of` decides what merges: everything closer than one nozzle width,
+    which erases alleys and lot lines but leaves any street wider than that as
+    a real gap between blocks. Only footprints of the same height class merge,
+    so a tower stands out of the crust rather than dissolving into it — a taller
+    block simply overlaps the lower ones it neighbours, which prints as the step
+    it should be.
+
+    A block's height is its members' footprint-weighted mean: within one class
+    that is the block's bulk rather than a compromise between a tower and a
+    shed, and unlike a max it does not let one mis-modelled record raise a whole
+    block. It spans from the lowest ground it covers (embedded) to the highest
+    plus that height, so no part of it floats and none is buried in a slope.
+
+    The clip is applied last, for the reason `printable` applies it last: a
+    block that straddles the model edge comes back cut flush with it, and what
+    survives the cut is held to the same noise floor, so the edge is not left
+    with unprintable nubs hanging off it.
+    """
+    geoms = np.empty(len(parts), dtype=object)
+    geoms[:] = parts
+    areas = shapely.area(geoms)
+
+    out = []
+    for c in np.unique(cls):
+        sel = np.flatnonzero(cls == c)
+        merged = blocks_of(geoms[sel], min_feature_mm)
+        if not merged:
+            continue
+        blocks = np.empty(len(merged), dtype=object)
+        blocks[:] = merged
+        shapely.prepare(blocks)  # the tested side of the predicate below
+
+        # Which block each member landed in. A closing only ever adds area, so
+        # every footprint still lies wholly inside exactly one of the blocks it
+        # produced, and a single interior point places it.
+        src, dst = shapely.STRtree(blocks).query(
+            shapely.point_on_surface(geoms[sel]), predicate="intersects"
+        )
+        n = len(merged)
+        weight = np.zeros(n)
+        hsum = np.zeros(n)
+        z_lo = np.full(n, np.inf)
+        z_hi = np.full(n, -np.inf)
+        w, h, s = areas[sel][src], heights[sel][src], surf[sel][src]
+        np.add.at(weight, dst, w)
+        np.add.at(hsum, dst, w * h)
+        np.minimum.at(z_lo, dst, s)
+        np.maximum.at(z_hi, dst, s)
+
+        for k in range(n):
+            if weight[k] <= 0:                        # no member placed: skip
+                continue
+            height = hsum[k] / weight[k]
+            for piece in polygon_parts(merged[k].intersection(clip)):
+                if piece.area >= min_feature_mm * min_feature_mm:
+                    out.append((piece, z_lo[k] - EMBED_MM, z_hi[k] + height))
+    return out
