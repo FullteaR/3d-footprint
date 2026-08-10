@@ -701,8 +701,8 @@ export function App() {
                   <input type="range" min={1} max={50} step={1} value={buildingScale} onChange={(e) => setBuildingScale(Number(e.target.value))} />
                 </div>
                 <div className="row">
-                  <label>{t.minFeature}<span className="val">{minFeature}mm</span></label>
-                  <input type="range" min={0.4} max={2} step={0.1} value={minFeature} onChange={(e) => setMinFeature(Number(e.target.value))} />
+                  <label>{t.minFeature}<span className="val">{minFeature ? `${minFeature}mm` : t.minFeatureOff}</span></label>
+                  <input type="range" min={0} max={2} step={0.1} value={minFeature} onChange={(e) => setMinFeature(Number(e.target.value))} />
                 </div>
                 <div className="row">
                   <label>{t.buildingColor}</label>

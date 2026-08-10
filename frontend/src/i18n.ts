@@ -59,6 +59,7 @@ const JA = {
   buildingsHint: "PLATEAU整備済みの都市のみ。",
   buildingScale: "高さ強調",
   minFeature: "最小幅",
+  minFeatureOff: "デフォルメなし",
   buildingColor: "建物・橋の色",
 
   secPlate: "銘板",
@@ -171,6 +172,7 @@ const EN: typeof JA = {
   buildingsHint: "Cities covered by PLATEAU only.",
   buildingScale: "Height exaggeration",
   minFeature: "Smallest width",
+  minFeatureOff: "no massing",
   buildingColor: "Building & bridge colour",
 
   secPlate: "Nameplate",

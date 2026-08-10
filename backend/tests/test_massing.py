@@ -201,3 +201,24 @@ def test_a_multipart_footprint_becomes_one_mesh():
 def test_a_prism_of_no_height_is_not_a_solid():
     assert prism(box(0.0, 0.0, 1.0, 1.0), 3.0, 3.0) is None
     assert prism(None, 0.0, 1.0) is None
+
+
+# ---- the massing switched off ----------------------------------------------
+
+def test_with_no_minimum_width_a_footprint_is_left_exactly_as_it_is():
+    """0 is the slider's left stop: print what PLATEAU drew. Nothing is
+    simplified away, nothing is grown, nothing is dropped."""
+    speck = box(0.0, 0.0, 0.3, 0.3)
+    assert printable(speck, 0.0).area == pytest.approx(0.09)   # no noise floor
+    assert outline_parts(speck, 0.0)[0].area == pytest.approx(0.09)
+    (block,) = blocks_of([speck], 0.0)
+    assert block.area == pytest.approx(0.09)                   # not widened
+
+
+def test_with_no_minimum_width_only_buildings_that_really_touch_merge():
+    """No closing radius, so a gap is a gap however small — the model is the
+    city as drawn rather than as printable."""
+    apart = [box(0.0, 0.0, 10.0, 10.0), box(10.1, 0.0, 20.0, 10.0)]
+    touching = [box(0.0, 0.0, 10.0, 10.0), box(9.9, 0.0, 20.0, 10.0)]
+    assert len(blocks_of(apart, 0.0)) == 2
+    assert len(blocks_of(touching, 0.0)) == 1
