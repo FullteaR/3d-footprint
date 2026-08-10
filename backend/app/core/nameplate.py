@@ -38,11 +38,13 @@ import numpy as np
 import shapely
 import svgelements as se
 import trimesh
+from lxml import etree
 from shapely import affinity
 from shapely.geometry import box
 from shapely.geometry.polygon import orient
 from shapely.ops import polygonize
 
+from . import safexml
 from .export import Body
 from .massing import _ring_xy
 
@@ -152,9 +154,32 @@ def _walk(group) -> "list[se.SVGElement]":
     return out
 
 
+def _refuse_declared_entities(data: bytes) -> None:
+    """Turn away an SVG that declares entities of its own, before expat sees it.
+
+    svgelements parses with the standard library's expat, which this program
+    cannot configure and which expands entities far more freely than libxml2
+    does: anything at all below 8 MiB, and a hundredfold above that. An upload
+    sitting on the 5 MB ceiling could therefore still become hundreds of
+    megabytes of text inside the parser. Nameplate artwork has no use for a
+    declared entity — no design tool writes one — so the document is read once
+    with a parser that expands nothing, and refused if it carries any.
+    """
+    try:
+        root = safexml.fromstring(data)
+    except etree.LxmlError as e:
+        raise ValueError(f"SVGを解析できません: {e}")
+    if safexml.entity_declarations(root):
+        raise ValueError(
+            "SVGが実体宣言（<!ENTITY>）を含んでいます。"
+            "デザインツールから書き出したままのファイルを使ってください"
+        )
+
+
 def svg_ink(data: bytes) -> shapely.Geometry:
     """Uploaded SVG -> filled ink geometry (design units, y flipped to print
     orientation, not yet fitted to the plate)."""
+    _refuse_declared_entities(data)
     try:
         svg = se.SVG.parse(BytesIO(data), reify=True)
     except Exception as e:

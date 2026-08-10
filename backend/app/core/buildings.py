@@ -51,6 +51,7 @@ from lxml import etree
 from shapely.geometry import box
 
 from ..config import DATA_DIR
+from . import safexml
 from .export import Body
 from .net import atomic_savez, session
 from .parallel import process_map
@@ -205,7 +206,7 @@ def _geometry(mesh: str, url: str):
         with session().get(url, stream=True, timeout=600) as resp:
             resp.raise_for_status()
             resp.raw.decode_content = True
-            for _, b in etree.iterparse(resp.raw, tag=_BUILDING_TAG):
+            for _, b in safexml.iterparse(resp.raw, _BUILDING_TAG):
                 started = voff
                 for label, ext, holes in _building_polygons(b):
                     if len(ext) < 3:

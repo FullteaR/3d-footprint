@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from lxml import etree
 
+from . import safexml
+
 
 @dataclass
 class Track:
@@ -45,7 +47,7 @@ def parse_gpx(data: bytes) -> Track:
     waypoint-style files still produce a path.
     """
     try:
-        root = etree.fromstring(data)
+        root = safexml.fromstring(data)
     except etree.LxmlError as e:
         # Not a ValueError on its own (it derives from SyntaxError), so the
         # route would answer a mistyped upload with a 500 instead of the

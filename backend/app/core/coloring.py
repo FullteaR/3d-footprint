@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 from scipy.ndimage import distance_transform_edt, gaussian_filter, label as ndlabel
 
 from ..config import DATA_DIR
-from . import jaxa
+from . import jaxa, safexml
 from .net import atomic_savez, session
 from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
@@ -123,7 +123,7 @@ def _parse_luse(stream) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
     """
     with_holes: list[list[tuple[int, np.ndarray]]] = []
     simple: list[list[tuple[int, np.ndarray]]] = []
-    for _, el in etree.iterparse(stream, tag=_LANDUSE_TAG):
+    for _, el in safexml.iterparse(stream, _LANDUSE_TAG):
         cl = el.find(_CLASS_TAG)
         try:
             code = int(cl.text) if cl is not None and cl.text else 0

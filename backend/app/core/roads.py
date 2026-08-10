@@ -50,6 +50,7 @@ from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.ops import transform
 
 from ..config import DATA_DIR
+from . import safexml
 from .buildings import _mesh3_codes, _rings
 from .massing import polygon_parts
 from .net import atomic_savez, session
@@ -110,7 +111,7 @@ def _surface(mesh: str, url: str):
         with session().get(url, stream=True, timeout=600) as resp:
             resp.raise_for_status()
             resp.raw.decode_content = True
-            for _, road in etree.iterparse(resp.raw, tag=_ROAD_TAG):
+            for _, road in safexml.iterparse(resp.raw, _ROAD_TAG):
                 polys.extend(_road_surface(road))
                 road.clear()
     except (requests.RequestException, OSError, ValueError):

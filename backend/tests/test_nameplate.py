@@ -212,3 +212,21 @@ def test_placing_the_plaque_moves_it_without_resizing_it():
     assert there.mesh.volume == pytest.approx(here.mesh.volume, rel=1e-9)
     centre = shapely.centroid(shapely.MultiPoint(there.mesh.vertices[:, :2]))
     assert centre.distance(shapely.Point(25.0, -13.0)) < 1.0
+
+
+def test_an_svg_that_declares_entities_is_refused():
+    """svgelements parses with expat, which this program cannot configure and
+    which expands entities far more freely than libxml2 — so the declarations
+    are caught before it is handed the file at all."""
+    bomb = (b'<!DOCTYPE svg [<!ENTITY a "AAAAAAAAAA">'
+            b'<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]>'
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40">'
+            b'<path d="M10,10 H90 V30 H10 Z" fill="#000"/><desc>&b;</desc></svg>')
+    with pytest.raises(ValueError, match="実体宣言"):
+        svg_ink(bomb)
+
+
+def test_an_ordinary_svg_is_untouched_by_that_check():
+    ink = svg_ink(b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40">'
+                  b'<path d="M10,10 H90 V30 H10 Z" fill="#000"/></svg>')
+    assert ink.area == pytest.approx(1600.0)

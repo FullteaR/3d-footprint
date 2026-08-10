@@ -38,6 +38,7 @@ from lxml import etree
 from shapely.geometry import box
 
 from ..config import DATA_DIR
+from . import safexml
 from .buildings import _mesh3_codes, _rings, _triangulate
 from .export import Body
 from .net import atomic_savez, session
@@ -115,7 +116,7 @@ def _geometry(mesh: str, url: str):
         with session().get(url, stream=True, timeout=600) as resp:
             resp.raise_for_status()
             resp.raw.decode_content = True
-            for _, b in etree.iterparse(resp.raw, tag=_BRIDGE_TAG):
+            for _, b in safexml.iterparse(resp.raw, _BRIDGE_TAG):
                 for ext, holes in _bridge_polygons(b):
                     if len(ext) < 3:
                         continue
