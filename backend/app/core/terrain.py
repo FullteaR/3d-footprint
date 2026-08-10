@@ -32,6 +32,7 @@ TILE_WORKERS = 16  # concurrent tile downloads (I/O-bound; a tile is a few KB)
 INVALID = 1 << 23  # 0x800000
 MAX_TILES = 512  # mosaic memory guard (512 tiles ~ 270 MB of float64)
 MIN_ZOOM = 8     # dem_png overview floor; z8 tiles span ~150 km already
+MAX_ZOOM = 15    # the finest the GSI DEM is published at (the 5 m layers)
 DEM10_LAYER = "dem_png"            # 10 m, served up to z14
 DEM5_LAYERS = ("dem5a_png", "dem5b_png")  # 5 m, z15; tried in order
 

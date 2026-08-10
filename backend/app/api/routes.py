@@ -29,7 +29,7 @@ from ..core.region import (
 )
 from ..core.roads import PlateauRoadProvider
 from ..core.stamp import ascii_credit, engrave_credit, formal_credit
-from ..core.terrain import fetch_elevation_grid
+from ..core.terrain import MAX_ZOOM, MIN_ZOOM, fetch_elevation_grid
 from ..core.track import track_ridge
 
 router = APIRouter(prefix="/api")
@@ -177,31 +177,31 @@ def _building_clip(structure_clip, roads, proj, grid):
 @router.post("/generate")
 def generate(
     file: UploadFile = File(...),
-    size_mm: float = Form(120.0),
-    vertical_scale: float = Form(1.0),
-    base_thickness_mm: float = Form(3.0),
-    track_width_mm: float = Form(1.2),
-    track_height_mm: float = Form(1.5),
+    size_mm: float = Form(120.0, gt=0, le=500),
+    vertical_scale: float = Form(1.0, gt=0, le=50),
+    base_thickness_mm: float = Form(3.0, ge=0, le=50),
+    track_width_mm: float = Form(1.2, ge=0, le=20),
+    track_height_mm: float = Form(1.5, ge=0, le=20),
     include_track: bool = Form(True),
     include_buildings: bool = Form(False),
-    building_scale: float = Form(1.0),
-    min_feature_mm: float = Form(0.8),
-    min_color_mm: float = Form(0.0),
+    building_scale: float = Form(1.0, ge=0, le=100),
+    min_feature_mm: float = Form(0.8, ge=0, le=10),
+    min_color_mm: float = Form(0.0, ge=0, le=20),
     terrain_color: str = Form("#c2b280"),
     track_color: str = Form("#dc4628"),
     building_color: str = Form("#b0b0b0"),
-    dem_zoom: int = Form(15),
-    grid_max: int = Form(1000),
+    dem_zoom: int = Form(MAX_ZOOM, ge=MIN_ZOOM, le=MAX_ZOOM),
+    grid_max: int = Form(1000, ge=50, le=2000),
     bbox: str = Form(""),
     time_range: str = Form(""),
     shape: str = Form("rect"),
     rotation_deg: float = Form(0.0),
     plate_svg: UploadFile | None = File(None),
     plate_center: str = Form(""),
-    plate_width_mm: float = Form(40.0),
-    plate_depth_mm: float = Form(16.0),
+    plate_width_mm: float = Form(40.0, gt=0, le=1000),
+    plate_depth_mm: float = Form(16.0, gt=0, le=1000),
     plate_rotation_deg: float = Form(0.0),
-    plate_relief_mm: float = Form(0.6),
+    plate_relief_mm: float = Form(0.6, ge=0, le=20),
     fmt: str = Form("stl"),
 ) -> Response:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.

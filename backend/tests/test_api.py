@@ -398,3 +398,52 @@ def test_a_city_sized_model_still_asks(client, offline, gpx, monkeypatch):
     monkeypatch.setattr(routes, "PlateauRoadProvider", _Nothing)
     assert post(client, gpx, include_buildings="true").status_code == 200
     assert set(asked) == {"bldg", "brid", "tran"}
+
+
+# ---- the numbers the route takes -------------------------------------------
+
+@pytest.mark.parametrize("param,value", [
+    ("grid_max", "0"),          # used to be a ZeroDivisionError, and a 500
+    ("grid_max", "-5"),         # used to collapse to a 4x3 model
+    ("grid_max", "100000000"),  # 285 tiles and 17M cells out of a 2 km bbox
+    ("dem_zoom", "0"),
+    ("dem_zoom", "40"),         # past what the GSI DEM is published at
+    ("size_mm", "0"),           # used to return a model 0 x 0 mm
+    ("size_mm", "-120"),        # ...and this one mirrored and upside down
+    ("size_mm", "1e9"),         # ...and this one 1,777 km across
+    ("vertical_scale", "-4"),   # terrain inverted, peaks became pits
+    ("base_thickness_mm", "-3"),
+    ("min_feature_mm", "-2"),
+    ("track_height_mm", "-9"),
+    ("building_scale", "1e9"),
+    ("plate_width_mm", "-40"),
+])
+def test_a_number_out_of_range_is_refused_by_name(client, gpx, offline, param, value):
+    """None of these used to be refused: one was a 500 and the rest came back
+    200 with a model that was quietly nonsense, which the reader would not find
+    out about until the slicer."""
+    resp = post(client, gpx, **{param: value})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"].startswith(f"{param}: ")
+
+
+def test_the_reason_arrives_as_a_sentence(client, gpx, offline):
+    """FastAPI's own 422 puts a list of dicts in `detail`, and the UI prints it
+    straight — the reader would get "[object Object]"."""
+    detail = post(client, gpx, size_mm="1e9").json()["detail"]
+    assert isinstance(detail, str)
+    assert "500" in detail          # names the limit it broke
+
+
+@pytest.mark.parametrize("param,value", [
+    ("size_mm", "20"), ("size_mm", "300"),        # the size lock's own stops
+    ("vertical_scale", "1"), ("vertical_scale", "30"),
+    ("base_thickness_mm", "0"), ("base_thickness_mm", "20"),
+    ("grid_max", "700"), ("grid_max", "1400"),    # the resolution picker
+    ("min_color_mm", "4"), ("track_width_mm", "0.4"), ("track_height_mm", "10"),
+    ("building_scale", "50"), ("min_feature_mm", "0"), ("min_feature_mm", "2"),
+])
+def test_every_value_the_ui_can_send_is_accepted(client, gpx, offline, param, value):
+    """The bounds have to sit outside the app's own controls, or the limit is
+    a bug that only its own front end can trigger."""
+    assert post(client, gpx, **{param: value}).status_code == 200

@@ -1,9 +1,10 @@
 """FastAPI app: serves the /api/* routes and the built frontend (single container)."""
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router as api_router
@@ -23,6 +24,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RequestValidationError)
+async def _readable_validation_error(request: Request, exc: RequestValidationError):
+    """Say which field was out of range, in the shape the UI already reads.
+
+    FastAPI answers a bad parameter with `detail` as a *list* of dicts, while
+    every other error here puts a sentence there — the front end shows it
+    straight, so the reader would get "[object Object]". This flattens it to
+    the field and what was wrong with it, and keeps the 422.
+    """
+    said = []
+    for err in exc.errors():
+        where = ".".join(str(p) for p in err.get("loc", ()) if p != "body")
+        msg = err.get("msg", "invalid value")
+        said.append(f"{where}: {msg}" if where else msg)
+    return JSONResponse(status_code=422, content={"detail": "; ".join(said)})
+
 
 app.include_router(api_router)
 
