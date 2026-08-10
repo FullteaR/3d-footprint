@@ -38,6 +38,34 @@ def test_trkpt_wins_over_other_point_kinds(make_gpx):
     assert track.lats == [35.0, 35.1]
 
 
+def test_a_point_with_no_coordinates_is_a_plain_value_error():
+    """It used to reach `float(None)` and come back a 500 — a broken export is
+    the caller's problem to see, not the server's to crash on."""
+    with pytest.raises(ValueError, match="point 1 is missing"):
+        parse_gpx(b'<gpx><trk><trkseg><trkpt lon="139.5"/></trkseg></trk></gpx>')
+
+
+@pytest.mark.parametrize("lat,lon", [
+    ("999", "139.5"),        # off the earth
+    ("35.5", "-181"),
+    ("nan", "nan"),          # unordered, so the range check refuses it
+    ("inf", "139.5"),
+])
+def test_a_point_that_is_not_on_the_earth_is_rejected_here(lat, lon):
+    """Not several steps later inside the DEM crop, which could only answer
+    with a message about itself."""
+    doc = (f'<gpx><trk><trkseg><trkpt lat="{lat}" lon="{lon}"/>'
+           f'<trkpt lat="35.6" lon="139.6"/></trkseg></trk></gpx>').encode()
+    with pytest.raises(ValueError, match="off the earth"):
+        parse_gpx(doc)
+
+
+def test_the_edges_of_the_earth_are_still_on_it():
+    track = parse_gpx(b'<gpx><trk><trkseg><trkpt lat="-90" lon="-180"/>'
+                      b'<trkpt lat="90" lon="180"/></trkseg></trk></gpx>')
+    assert track.lats == [-90.0, 90.0]
+
+
 def test_pointless_gpx_is_rejected():
     with pytest.raises(ValueError, match="no trkpt"):
         parse_gpx(b'<?xml version="1.0"?><gpx version="1.1"><trk/></gpx>')

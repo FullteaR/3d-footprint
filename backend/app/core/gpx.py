@@ -55,11 +55,42 @@ def parse_gpx(data: bytes) -> Track:
     for tag in ("trkpt", "rtept", "wpt"):
         pts = root.findall(f".//{{*}}{tag}")
         if pts:
-            lats = [float(p.get("lat")) for p in pts]
-            lons = [float(p.get("lon")) for p in pts]
+            lats, lons = _coordinates(pts)
             return Track(lats=lats, lons=lons, times=_track_times(pts))
 
     raise ValueError("GPX contains no trkpt/rtept/wpt points")
+
+
+def _coordinates(pts) -> tuple[list[float], list[float]]:
+    """Every point's lat/lon, refusing the file if any of them is not one.
+
+    A point that carries no coordinates is not a point, and one out at
+    lat=999 or lat=nan is not on the earth. Both used to travel: the missing
+    attribute reached `float(None)` and came back a 500, and the impossible
+    ones were only caught several steps later by the DEM crop, which answered
+    with a message about itself rather than about the file. Rejecting a whole
+    file rather than skipping the bad points is the same answer a non-numeric
+    lat has always got, and it does not quietly reshape someone's track.
+    """
+    lats: list[float] = []
+    lons: list[float] = []
+    for n, p in enumerate(pts, start=1):
+        lat, lon = p.get("lat"), p.get("lon")
+        if lat is None or lon is None:
+            raise ValueError(f"GPX point {n} is missing its lat/lon")
+        try:
+            lat, lon = float(lat), float(lon)
+        except ValueError:
+            raise ValueError(f"GPX point {n} has a non-numeric lat/lon")
+        # NaN and the infinities fail this too, being unordered against
+        # everything — which is exactly what should happen to them.
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            raise ValueError(
+                f"GPX point {n} is off the earth: lat={lat}, lon={lon}"
+            )
+        lats.append(lat)
+        lons.append(lon)
+    return lats, lons
 
 
 def _track_times(pts) -> list[float] | None:
