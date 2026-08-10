@@ -351,3 +351,50 @@ def test_a_time_range_on_an_unstamped_gpx_is_a_400(client, gpx, offline):
     resp = post(client, gpx, time_range="0,100")
     assert resp.status_code == 400
     assert "timestamps" in resp.json()["detail"]
+
+
+# ---- what a very wide model does not ask for -------------------------------
+
+def test_a_flight_sized_model_does_not_ask_plateau_for_buildings(client, offline,
+                                                                 make_gpx, monkeypatch):
+    """At that scale a nozzle covers kilometres, so every block and arterial is
+    far under one printed line — and the catalog is queried thirty 1 km meshes
+    at a time, which for a flight track is tens of thousands of requests for
+    geometry nobody could print."""
+    asked = []
+    for name in ("PlateauBuildingProvider", "PlateauBridgeProvider",
+                 "PlateauRoadProvider"):
+        monkeypatch.setattr(routes, name,
+                            lambda n=name: asked.append(n) or _Boom())
+
+    flight = make_gpx([(34.60, 135.20), (35.60, 139.90)])          # 羽田 -> 伊丹
+    resp = post(client, flight, include_buildings="true", size_mm="120")
+    assert resp.status_code == 200, resp.text
+    assert asked == []
+    # ...and the 出典 must not claim PLATEAU was used when it was not.
+    assert "PLATEAU" not in metadata(resp.content)["Copyright"]
+
+
+class _Boom:
+    def __getattr__(self, name):
+        raise AssertionError("PLATEAU was asked at a scale it cannot print")
+
+
+def test_a_city_sized_model_still_asks(client, offline, gpx, monkeypatch):
+    asked = []
+
+    class _Nothing:
+        def building_body(self, *a, **kw):
+            asked.append("bldg")
+
+        def bridge_body(self, *a, **kw):
+            asked.append("brid")
+
+        def road_cut(self, *a, **kw):
+            asked.append("tran")
+
+    monkeypatch.setattr(routes, "PlateauBuildingProvider", _Nothing)
+    monkeypatch.setattr(routes, "PlateauBridgeProvider", _Nothing)
+    monkeypatch.setattr(routes, "PlateauRoadProvider", _Nothing)
+    assert post(client, gpx, include_buildings="true").status_code == 200
+    assert set(asked) == {"bldg", "brid", "tran"}

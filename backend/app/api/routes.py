@@ -115,6 +115,23 @@ def _plate_plan(
     return PlatePlan(ink, tile, at, levels, footprint)
 
 
+# Metres of ground under one printed millimetre, past which PLATEAU's structure
+# layer has nothing left to say. Every building, block and arterial is by then
+# far below the finest line the printer can draw, so what would come back is a
+# featureless lump over each city — and asking is also the point at which it
+# becomes rude, since the catalog is queried thirty 1 km meshes at a time and a
+# flight track's extent runs to tens of thousands of requests for geometry that
+# could not have been printed. Land-use colouring is not gated with it: those
+# files are 10 km meshes, a hundredth of the traffic, and sea against forest
+# against city still reads at any scale.
+STRUCTURE_LIMIT_M_PER_MM = 600.0
+
+
+def _structures_can_show(proj) -> bool:
+    """Whether PLATEAU buildings/bridges/roads could print at this scale."""
+    return 1.0 / proj.scale <= STRUCTURE_LIMIT_M_PER_MM
+
+
 def _grid_box(proj, grid):
     """The fetched grid rectangle in print mm — the plain-rect model outline."""
     return box(
@@ -197,7 +214,9 @@ def generate(
     footprints as they come. `include_buildings` masses PLATEAU buildings into
     city blocks and bridges into decks on pillars, and cuts the 幹線街路 back
     through the massing at that width — the only way an arterial reads below
-    about 1:40,000. Neither takes a threshold; see roads.py.
+    about 1:40,000. Neither takes a threshold; see roads.py. Past
+    `STRUCTURE_LIMIT_M_PER_MM` the whole structure layer is skipped, and the
+    出典 then names only the sources the model really used.
 
     `time_range` ("start,end" in epoch seconds) trims the GPX to one leg of the
     outing before anything else: the automatic extent follows the trimmed track.
@@ -285,7 +304,10 @@ def generate(
         bodies: list[Body] = terrain_solid(
             proj, cat_grid, naturalize=smooth_colors, clip=clip_mm
         )
-        if include_buildings:
+        # Requested *and* fine enough to show; below, the credit names what
+        # was actually used rather than what was asked for.
+        structures = include_buildings and _structures_can_show(proj)
+        if structures:
             # Bridges/elevated structures share the buildings toggle and colour
             # layer; both are massed into printable blocks (min_feature_mm sets
             # the minimum printable width), differing only in placement: buildings
@@ -358,7 +380,7 @@ def generate(
         # formal 出典 sentence debossed on the underside travels with the
         # print itself; the same sentence rides in the file metadata.
         engrave_credit(
-            bodies, landuse, include_buildings, px0, px1, base_thickness_mm,
+            bodies, landuse, structures, px0, px1, base_thickness_mm,
         )
 
         if plate is not None:
@@ -373,8 +395,8 @@ def generate(
         }
         data, content_type, ext = export_bodies(
             bodies, fmt, colors,
-            credit_full=formal_credit(landuse, include_buildings),
-            credit_ascii=ascii_credit(landuse, include_buildings),
+            credit_full=formal_credit(landuse, structures),
+            credit_ascii=ascii_credit(landuse, structures),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
