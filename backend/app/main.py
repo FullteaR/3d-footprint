@@ -7,10 +7,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router as api_router
-from .config import CORS_ORIGINS, STATIC_DIR
+from .config import CORS_ORIGINS, MAX_REQUEST_BYTES, STATIC_DIR
+from .limits import LimitRequestBody
 
 app = FastAPI(title="3d-footprint", version="0.1.0")
 
+# Order matters, and it is the reverse of the order added: the last one wrapped
+# is the outermost. CORS goes on last so its headers reach the body-size 413
+# too — without them a browser reports the refusal as a CORS failure and the
+# reason never gets to the user.
+app.add_middleware(LimitRequestBody, limit=MAX_REQUEST_BYTES)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,

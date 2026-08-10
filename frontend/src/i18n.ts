@@ -86,6 +86,9 @@ const JA = {
   stDownloading: "生成中…",
   stDownloaded: "ダウンロードしました。",
   errorPrefix: "エラー: ",
+  gpxFile: "GPXファイル",
+  svgFile: "銘板のSVG",
+  tooLarge: (what: string, mb: number) => `${what}が大きすぎます（上限 ${mb} MB）`,
 
   mapTitle: "モデル化する範囲",
   shapeRect: "長方形",
@@ -199,6 +202,9 @@ const EN: typeof JA = {
   stDownloading: "Generating…",
   stDownloaded: "Downloaded.",
   errorPrefix: "Error: ",
+  gpxFile: "The GPX file",
+  svgFile: "The nameplate SVG",
+  tooLarge: (what: string, mb: number) => `${what} is too large (limit ${mb} MB)`,
 
   mapTitle: "AREA TO MODEL",
   shapeRect: "Rectangle",

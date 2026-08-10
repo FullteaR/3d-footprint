@@ -19,6 +19,10 @@ type Status =
   | { kind: "needFile" | "generating" | "downloading" | "downloaded" }
   | { kind: "error"; detail: string }
   | null;
+// Mirrors MAX_GPX_BYTES / MAX_SVG_BYTES in backend/app/config.py.
+const MAX_GPX_MB = 20;
+const MAX_SVG_MB = 5;
+
 const STATUS_TEXT = {
   needFile: "stNeedFile", generating: "stGenerating",
   downloading: "stDownloading", downloaded: "stDownloaded",
@@ -531,11 +535,22 @@ export function App() {
     }
   }
 
+  // Refuse an oversized file here rather than after uploading it. The server
+  // enforces the same ceilings (MAX_GPX_BYTES / MAX_SVG_BYTES in
+  // backend/app/config.py); these only save the round trip.
+  function sized(f: File | null, limitMb: number, what: string): File | null {
+    if (f && f.size > limitMb * 1024 * 1024) {
+      setStatus({ kind: "error", detail: t.tooLarge(what, limitMb) });
+      return null;
+    }
+    return f;
+  }
+
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
     const f = e.dataTransfer.files?.[0];
-    if (f) setFile(f);
+    if (f) setFile(sized(f, MAX_GPX_MB, t.gpxFile));
   }
 
   return (
@@ -570,7 +585,7 @@ export function App() {
               onDragLeave={() => setDragOver(false)}
               onDrop={onDrop}
             >
-              <input type="file" accept=".gpx" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              <input type="file" accept=".gpx" onChange={(e) => setFile(sized(e.target.files?.[0] ?? null, MAX_GPX_MB, t.gpxFile))} />
               {file ? (
                 <>
                   <div className="file-name">{file.name}</div>
@@ -725,7 +740,7 @@ export function App() {
             {includePlate && (
               <>
                 <label className={`dropzone slim${plateSvg ? " has-file" : ""}`}>
-                  <input type="file" accept=".svg,image/svg+xml" onChange={(e) => setPlateSvg(e.target.files?.[0] ?? null)} />
+                  <input type="file" accept=".svg,image/svg+xml" onChange={(e) => setPlateSvg(sized(e.target.files?.[0] ?? null, MAX_SVG_MB, t.svgFile))} />
                   {plateSvg ? (
                     <div className="file-name">{plateSvg.name}</div>
                   ) : (

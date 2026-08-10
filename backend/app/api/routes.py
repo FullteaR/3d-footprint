@@ -9,6 +9,7 @@ from fastapi.responses import Response
 from shapely.geometry import box
 from shapely.ops import transform
 
+from ..config import MAX_GPX_BYTES, MAX_SVG_BYTES
 from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
 from ..core.export import Body, export_bodies
@@ -37,6 +38,23 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+def _read_upload(upload: UploadFile, limit: int, what: str) -> bytes:
+    """An upload's bytes, refusing anything past `limit`.
+
+    Reads one byte past the ceiling rather than trusting a declared size, so
+    what is measured is what actually arrived. The body as a whole is already
+    capped before it is parsed (`limits.LimitRequestBody`); this is what tells
+    a caller *which* of their files was the problem.
+    """
+    data = upload.file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{what}が大きすぎます（上限 {limit // (1024 * 1024)} MB）",
+        )
+    return data
 
 
 class PlatePlan(NamedTuple):
@@ -198,10 +216,11 @@ def generate(
     model outline*, so rotating the model carries the plate with it).
     """
     try:
-        track = parse_gpx(file.file.read())
+        track = parse_gpx(_read_upload(file, MAX_GPX_BYTES, "GPXファイル"))
         if time_range:
             track = trim_track(track, *parse_time_range_param(time_range))
-        plate_data = plate_svg.file.read() if plate_svg is not None else b""
+        plate_data = (_read_upload(plate_svg, MAX_SVG_BYTES, "銘板のSVG")
+                      if plate_svg is not None else b"")
         area = parse_bbox_param(bbox) if bbox else expand_bbox(track.bbox)
         region = Region(
             bbox=area,
