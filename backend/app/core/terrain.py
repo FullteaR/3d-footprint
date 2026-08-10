@@ -153,6 +153,21 @@ def fetch_elevation_grid(
         return (int(math.floor(xt0f)), int(math.floor(xt1f)),
                 int(math.floor(yt0f)), int(math.floor(yt1f)))
 
+    def _pixels(z: int) -> float:
+        """Mosaic pixels across the wider edge of the bbox at zoom `z`."""
+        xa, ya = _lonlat_to_tile(min_lon, max_lat, z)
+        xb, yb = _lonlat_to_tile(max_lon, min_lat, z)
+        return max(xb - xa, yb - ya) * TILE_SIZE
+
+    # Don't buy detail the output cannot carry. The mosaic is strided down to
+    # `grid_max` cells per edge at the end, so while the next zoom *coarser*
+    # would still cover the bbox with that many pixels, everything the finer
+    # one costs is thrown away by the stride. This is what makes `grid_max` a
+    # limit on the download and not only on the model: an 18 km area at the
+    # default falls from 399 tiles to 28 with the same grid coming out.
+    while zoom > MIN_ZOOM and _pixels(zoom - 1) >= grid_max:
+        zoom -= 1
+
     xt0, xt1, yt0, yt1 = _tile_range(zoom)
     while (xt1 - xt0 + 1) * (yt1 - yt0 + 1) > MAX_TILES and zoom > MIN_ZOOM:
         zoom -= 1
