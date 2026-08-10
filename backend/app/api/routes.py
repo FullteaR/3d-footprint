@@ -26,6 +26,7 @@ from ..core.region import (
     Region, clip_track_to_polygon, parse_lonlat_param, parse_rotation_param,
     parse_shape_param,
 )
+from ..core.roads import PlateauRoadProvider
 from ..core.stamp import ascii_credit, engrave_credit, formal_credit
 from ..core.terrain import fetch_elevation_grid
 from ..core.track import track_ridge
@@ -96,6 +97,14 @@ def _plate_plan(
     return PlatePlan(ink, tile, at, levels, footprint)
 
 
+def _grid_box(proj, grid):
+    """The fetched grid rectangle in print mm — the plain-rect model outline."""
+    return box(
+        float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
+        float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
+    )
+
+
 def _structure_clip(clip_mm, plate: PlatePlan | None, proj, grid):
     """The outline buildings and bridges are cut to, minus the 銘板.
 
@@ -110,13 +119,24 @@ def _structure_clip(clip_mm, plate: PlatePlan | None, proj, grid):
     if plate is None:
         return clip_mm
     if clip_mm is None:            # plain rect: the fetched grid is the outline
-        clip_mm = box(
-            float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
-            float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
-        )
+        clip_mm = _grid_box(proj, grid)
     return clip_mm.difference(
         transform(lambda x, y: (proj.x_of(x), proj.y_of(y)), plate.footprint)
     )
+
+
+def _building_clip(structure_clip, roads, proj, grid):
+    """The structure outline with the road grooves taken out of it as well.
+
+    Buildings only: a bridge deck *is* a road, so cutting it along the road it
+    carries would take the span apart. The terrain is left alone too — the map
+    keeps its real surface and only the massing is divided.
+    """
+    if roads is None or roads.is_empty:
+        return structure_clip
+    if structure_clip is None:
+        structure_clip = _grid_box(proj, grid)
+    return structure_clip.difference(roads)
 
 
 @router.post("/generate")
@@ -153,6 +173,13 @@ def generate(
 
     Land-use colouring is always applied where data covers the area; only its
     printed detail is tunable (`min_color_mm`, 0 = paint the raw cells).
+
+    `min_feature_mm` is the narrowest thing the printer can lay down, and it
+    drives the whole printability massing: 0 switches that off and prints the
+    footprints as they come. `include_buildings` masses PLATEAU buildings into
+    city blocks and bridges into decks on pillars, and cuts the 幹線街路 back
+    through the massing at that width — the only way an arterial reads below
+    about 1:40,000. Neither takes a threshold; see roads.py.
 
     `time_range` ("start,end" in epoch seconds) trims the GPX to one leg of the
     outing before anything else: the automatic extent follows the trimmed track.
@@ -244,8 +271,21 @@ def generate(
             # layer; both are massed into printable blocks (min_feature_mm sets
             # the minimum printable width), differing only in placement: buildings
             # sit on the surface, bridges keep their real deck elevation + pillars.
+            # 大通りで街区を割る. Below ~1:40,000 no real road is a nozzle wide,
+            # so the arterials are cut in deliberately rather than waited for
+            # (roads.py). Nothing to decide: where there is road data and a
+            # minimum feature width, the 幹線街路 are the first thing that width
+            # is spent on. `road_cut` returns None where PLATEAU has no tran.
+            roads = (
+                PlateauRoadProvider().road_cut(
+                    proj, min_feature_mm,
+                    outline=clip_mm if clip_mm is not None else _grid_box(proj, grid),
+                )
+                if min_feature_mm > 0 else None
+            )
             building_body = PlateauBuildingProvider().building_body(
-                proj, building_scale, min_feature_mm, clip=structure_clip
+                proj, building_scale, min_feature_mm,
+                clip=_building_clip(structure_clip, roads, proj, grid),
             )
             if building_body is not None:
                 bodies.append(building_body)

@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from shapely.geometry import Point, box
+from shapely.ops import transform
 
 from app.api import routes
 from app.main import app
@@ -224,13 +225,79 @@ def test_nothing_is_built_on_top_of_the_nameplate(client, gpx, offline, monkeypa
               "plate_center": f"{plon},{plat}", **shape},
     )
     assert resp.status_code == 200, resp.text
-    assert set(seen) == {"bldg", "brid"}
+    assert {"bldg", "brid"} <= set(seen)
     for proj, clip in seen.values():
         assert clip is not None          # a plain rect gets a real outline now
         def at(lon, lat):
             return Point(float(proj.x_of(lon)), float(proj.y_of(lat)))
         assert not clip.contains(at(plon, plat))                    # the plaque
         assert clip.contains(at(plon, LAT0 + 0.3 * DEG))            # the map
+
+
+def test_the_road_grooves_reach_the_blocks_but_not_the_bridges(client, gpx, offline,
+                                                               monkeypatch):
+    """A bridge deck *is* a road: cutting it along the road it carries would
+    take the span apart, so only the buildings get the grooves."""
+    seen = {}
+    groove = box(LON0 + 0.4 * DEG, LAT0, LON0 + 0.6 * DEG, LAT0 + DEG)
+
+    class _Roads:
+        def road_cut(self, proj, min_feature_mm=0.8, outline=None):
+            seen["asked"] = True
+            return transform(lambda x, y: (proj.x_of(x), proj.y_of(y)), groove)
+
+    class _Recorder:
+        def __init__(self, key):
+            self.key = key
+
+        def building_body(self, proj, height_scale=1.0, min_feature_mm=0.8, clip=None):
+            seen[self.key] = (proj, clip)
+            return None
+
+        def bridge_body(self, proj, min_feature_mm=0.8, clip=None):
+            seen[self.key] = (proj, clip)
+            return None
+
+    monkeypatch.setattr(routes, "PlateauRoadProvider", _Roads)
+    monkeypatch.setattr(routes, "PlateauBuildingProvider", lambda: _Recorder("bldg"))
+    monkeypatch.setattr(routes, "PlateauBridgeProvider", lambda: _Recorder("brid"))
+
+    resp = post(client, gpx, include_buildings="true")
+    assert resp.status_code == 200, resp.text
+    assert seen["asked"]           # applied on its own, with nothing set
+
+    proj, blocks = seen["bldg"]
+    at = lambda lon, lat: Point(float(proj.x_of(lon)), float(proj.y_of(lat)))
+    assert not blocks.contains(at(LON0 + 0.5 * DEG, LAT0 + 0.5 * DEG))  # on the road
+    assert blocks.contains(at(LON0 + 0.1 * DEG, LAT0 + 0.5 * DEG))      # beside it
+    # The bridges keep the model's own outline — None here, which each provider
+    # reads as the fetched grid rectangle.
+    assert seen["brid"][1] is None
+
+
+def test_no_minimum_width_means_no_massing_and_no_road_data(client, gpx, offline,
+                                                            monkeypatch):
+    """A minimum feature width is what the whole デフォルメ is for. With
+    none asked for, the footprints print as they come — and the road cut,
+    which exists only to spend that width on the arterials, never fetches
+    its half-gigabyte of `tran`."""
+
+    class _Never:
+        def __init__(self):
+            raise AssertionError("tran was fetched with the road cut switched off")
+
+    class _Nothing:
+        def building_body(self, *a, **kw):
+            return None
+
+        def bridge_body(self, *a, **kw):
+            return None
+
+    monkeypatch.setattr(routes, "PlateauRoadProvider", _Never)
+    monkeypatch.setattr(routes, "PlateauBuildingProvider", _Nothing)
+    monkeypatch.setattr(routes, "PlateauBridgeProvider", _Nothing)
+    assert post(client, gpx, include_buildings="true",
+                min_feature_mm="0").status_code == 200
 
 
 def test_without_a_nameplate_the_structure_outline_is_left_alone(flat_grid, flat_proj):

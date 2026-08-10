@@ -25,8 +25,8 @@ DEM / PLATEAU のキャッシュは `./data` に永続化されます。
   （政府標準利用規約2.0準拠・出典明記）。
   ※ DEMは測量成果のため、**印刷した模型の販売など**では別途
   測量成果の複製・使用承認が必要になる場合があります（要・最新規約確認）
-- **建物・橋・土地利用**: [Project PLATEAU](https://www.mlit.go.jp/plateau/)
-  （国土交通省）の CityGML（bldg / brid / luse）— 政府標準利用規約2.0（CC BY 4.0互換）
+- **建物・橋・道路・土地利用**: [Project PLATEAU](https://www.mlit.go.jp/plateau/)
+  （国土交通省）の CityGML（bldg / brid / tran / luse）— 政府標準利用規約2.0（CC BY 4.0互換）
 - **土地被覆（色の補完）**: [JAXA 高解像度土地利用土地被覆図](https://www.eorc.jaxa.jp/ALOS/jp/dataset/lulc_j.htm)
   v25.04（[JAXA Earth API](https://data.earth.jaxa.jp/) 経由）— 出典明記
 - **地図表示**: [OpenStreetMap](https://www.openstreetmap.org/copyright)
