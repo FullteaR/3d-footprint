@@ -15,6 +15,7 @@ import zipfile
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from shapely.geometry import Point, box
 
 from app.api import routes
 from app.main import app
@@ -183,6 +184,64 @@ def test_an_uploaded_svg_becomes_a_nameplate(client, gpx, offline):
     assert resp.status_code == 200, resp.text
     assert "nameplate" in object_names(resp.content)
 
+
+@pytest.mark.parametrize("shape", [{}, {"rotation_deg": "20"}],
+                         ids=["plain-rect", "rotated"])
+def test_nothing_is_built_on_top_of_the_nameplate(client, gpx, offline, monkeypatch,
+                                                  shape):
+    """PLATEAU blocks were being extruded over the plaque.
+
+    The map under the plate is routed out into a pocket, so anything left
+    standing there rises out of the recess and buries the artwork — and the
+    plaque is the one thing on the model that has to stay readable. Both
+    structure providers must be handed an outline with the plate cut out.
+    """
+    seen = {}
+
+    class _Recorder:
+        """Stands in for a PLATEAU provider, keeping the outline it was given."""
+
+        def __init__(self, key):
+            self.key = key
+
+        def building_body(self, proj, height_scale=1.0, min_feature_mm=0.8, clip=None):
+            seen[self.key] = (proj, clip)
+            return None
+
+        def bridge_body(self, proj, min_feature_mm=0.8, clip=None):
+            seen[self.key] = (proj, clip)
+            return None
+
+    monkeypatch.setattr(routes, "PlateauBuildingProvider", lambda: _Recorder("bldg"))
+    monkeypatch.setattr(routes, "PlateauBridgeProvider", lambda: _Recorder("brid"))
+
+    plon, plat = LON0 + 0.5 * DEG, LAT0 + 0.5 * DEG
+    resp = client.post(
+        "/api/generate",
+        files={"file": ("track.gpx", gpx, "application/gpx+xml"),
+               "plate_svg": ("plate.svg", SVG, "image/svg+xml")},
+        data={"fmt": "3mf", "include_buildings": "true",
+              "plate_center": f"{plon},{plat}", **shape},
+    )
+    assert resp.status_code == 200, resp.text
+    assert set(seen) == {"bldg", "brid"}
+    for proj, clip in seen.values():
+        assert clip is not None          # a plain rect gets a real outline now
+        def at(lon, lat):
+            return Point(float(proj.x_of(lon)), float(proj.y_of(lat)))
+        assert not clip.contains(at(plon, plat))                    # the plaque
+        assert clip.contains(at(plon, LAT0 + 0.3 * DEG))            # the map
+
+
+def test_without_a_nameplate_the_structure_outline_is_left_alone(flat_grid, flat_proj):
+    """No plate, no hole — a plain rect keeps handing the providers None so
+    they fall back to the fetched grid rectangle themselves."""
+    assert routes._structure_clip(None, None, flat_proj, flat_grid) is None
+    outline = box(0.0, 0.0, 10.0, 10.0)
+    assert routes._structure_clip(outline, None, flat_proj, flat_grid) is outline
+
+
+# ---- the nameplate, continued ----------------------------------------------
 
 def test_a_nameplate_without_a_position_is_a_400(client, gpx, offline):
     resp = client.post(

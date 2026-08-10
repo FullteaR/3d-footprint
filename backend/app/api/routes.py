@@ -96,6 +96,29 @@ def _plate_plan(
     return PlatePlan(ink, tile, at, levels, footprint)
 
 
+def _structure_clip(clip_mm, plate: PlatePlan | None, proj, grid):
+    """The outline buildings and bridges are cut to, minus the 銘板.
+
+    Nothing stands on the plaque. The map under it has just been routed out
+    for the plate, so a block or a bridge deck left there would rise out of
+    the pocket and bury the artwork — and the plate is the one thing on the
+    model the reader has to be able to read. A user can place the plate clear
+    of their own track; they cannot place it clear of the city, so it is the
+    structures that give way. What straddles the edge is cut flush with it,
+    the same as at the model's own outline.
+    """
+    if plate is None:
+        return clip_mm
+    if clip_mm is None:            # plain rect: the fetched grid is the outline
+        clip_mm = box(
+            float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
+            float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
+        )
+    return clip_mm.difference(
+        transform(lambda x, y: (proj.x_of(x), proj.y_of(y)), plate.footprint)
+    )
+
+
 @router.post("/generate")
 def generate(
     file: UploadFile = File(...),
@@ -187,6 +210,7 @@ def generate(
         )
         if plate is not None:
             proj.flatten_under(plate.footprint, plate.levels.pocket)
+        structure_clip = _structure_clip(clip_mm, plate, proj, grid)
 
         # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells PLATEAU
         # doesn't classify; the rest stays the terrain colour. None when neither
@@ -221,12 +245,12 @@ def generate(
             # the minimum printable width), differing only in placement: buildings
             # sit on the surface, bridges keep their real deck elevation + pillars.
             building_body = PlateauBuildingProvider().building_body(
-                proj, building_scale, min_feature_mm, clip=clip_mm
+                proj, building_scale, min_feature_mm, clip=structure_clip
             )
             if building_body is not None:
                 bodies.append(building_body)
             bridge_body = PlateauBridgeProvider().bridge_body(
-                proj, min_feature_mm, clip=clip_mm
+                proj, min_feature_mm, clip=structure_clip
             )
             if bridge_body is not None:
                 bodies.append(bridge_body)
