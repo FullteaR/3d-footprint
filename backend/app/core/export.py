@@ -86,13 +86,19 @@ def _creased_normals(mesh: trimesh.Trimesh, angle_deg: float) -> trimesh.Trimesh
     )
     _, group = connected_components(graph, directed=False)
 
-    # Each (original vertex, smooth group) becomes one output vertex.
+    # Each (original vertex, smooth group) becomes one output vertex. The pair
+    # is packed into one integer rather than uniqued as a two-column array:
+    # `np.unique(..., axis=0)` lexsorts eight million rows as records, which on
+    # a city is most of the whole preview export. With the vertex id as the
+    # high digit the packed key sorts identically, so the output is unchanged.
     fv = faces.reshape(-1)               # 3*nf corner -> original vertex id
     fg = np.repeat(group, 3)             # 3*nf corner -> smooth group id
-    key, inv = np.unique(np.stack([fv, fg], 1), axis=0, return_inverse=True)
+    ngroups = int(group.max()) + 1 if nf else 1
+    key, inv = np.unique(fv.astype(np.int64) * ngroups + fg, return_inverse=True)
     inv = inv.ravel()
     out = trimesh.Trimesh(
-        vertices=mesh.vertices[key[:, 0]], faces=inv.reshape(-1, 3), process=False
+        vertices=mesh.vertices[key // ngroups], faces=inv.reshape(-1, 3),
+        process=False,
     )
     vn = np.zeros((len(key), 3))
     np.add.at(vn, inv, np.repeat(mesh.face_normals, 3, axis=0))
@@ -251,6 +257,29 @@ def _write_stl_multi(bodies, used, color_map, credit_full=None, credit_ascii=Non
     return buf.getvalue()
 
 
+_XML_ROWS_PER_PASS = 100_000   # bounded so the repeated template stays small
+
+
+def _rows_to_xml(rows: np.ndarray, template: str) -> str:
+    """Format an (n, k) array into one string, `template` applied per row.
+
+    A single `%` over a repeated template does the formatting in C; writing an
+    f-string per row runs the interpreter a few million times instead, which
+    on a city is several seconds of a download. Chunked only so the repeated
+    template does not itself grow to hundreds of megabytes. The bytes produced
+    are identical either way.
+    """
+    n, k = rows.shape
+    flat = rows.ravel().tolist()
+    if n <= _XML_ROWS_PER_PASS:
+        return (template * n) % tuple(flat)
+    out = []
+    for i in range(0, n, _XML_ROWS_PER_PASS):
+        part = flat[i * k:(i + _XML_ROWS_PER_PASS) * k]
+        out.append((template * (len(part) // k)) % tuple(part))
+    return "".join(out)
+
+
 def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
     """3MF with a basematerials palette and one watertight object per body.
 
@@ -286,15 +315,15 @@ def _write_3mf(bodies, palette, index_of, credit_full=None) -> bytes:
     for i, body in enumerate(bodies):
         oid = i + 2  # id 1 is the basematerials group
         name = escape(names[i], {'"': "&quot;"})
-        verts = "".join(
-            f'<vertex x="{x:.6f}" y="{y:.6f}" z="{z:.6f}"/>'
-            for x, y, z in body.mesh.vertices
-        )
+        verts = _rows_to_xml(np.asarray(body.mesh.vertices, dtype=np.float64),
+                             '<vertex x="%.6f" y="%.6f" z="%.6f"/>')
+        # One dict lookup per distinct label rather than per triangle.
         lbl = body.face_labels()
-        tris = "".join(
-            f'<triangle v1="{a}" v2="{b}" v3="{c}" pid="1" p1="{index_of[l]}"/>'
-            for (a, b, c), l in zip(body.mesh.faces, lbl)
-        )
+        distinct, back = np.unique(lbl, return_inverse=True)
+        pid = np.array([index_of[l] for l in distinct], np.int64)[back.ravel()]
+        tris = _rows_to_xml(
+            np.column_stack([np.asarray(body.mesh.faces, np.int64), pid]),
+            '<triangle v1="%d" v2="%d" v3="%d" pid="1" p1="%d"/>')
         objects.append(
             f'<object id="{oid}" type="model" name="{name}"><mesh>'
             f"<vertices>{verts}</vertices><triangles>{tris}</triangles>"

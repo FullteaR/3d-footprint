@@ -16,7 +16,10 @@ import numpy as np
 import pytest
 import trimesh
 
-from app.core.export import DEFAULT_COLORS, Body, _part_names, export_bodies
+from app.core.export import (
+    DEFAULT_COLORS, Body, _XML_ROWS_PER_PASS, _part_names, _rows_to_xml,
+    export_bodies,
+)
 
 _3MF = {"m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
 CREDIT = "出典: 国土地理院「地理院タイル（標高タイル）」 を加工して作成"
@@ -207,3 +210,41 @@ def test_glb_writes_normals_for_a_multi_colour_body():
 def test_glb_paints_one_colour_per_body():
     doc = glb_json(export_bodies([cube("water"), cube("forest")], "glb")[0])
     assert len(doc["meshes"]) == 2
+
+
+# ---- bulk XML formatting ---------------------------------------------------
+
+def per_row(rows, template):
+    """The obvious way, which is what the fast one has to agree with."""
+    return "".join(template % tuple(r) for r in rows.tolist())
+
+
+def test_rows_are_formatted_exactly_as_one_at_a_time_would():
+    rows = np.column_stack([np.arange(2000), np.arange(2000) * 3, np.arange(2000),
+                            np.arange(2000) % 5]).astype(np.int64)
+    tmpl = '<triangle v1="%d" v2="%d" v3="%d" pid="1" p1="%d"/>'
+    assert _rows_to_xml(rows, tmpl) == per_row(rows, tmpl)
+
+
+def test_float_rows_keep_every_digit_they_had():
+    rng = np.random.default_rng(0)
+    rows = rng.random((1500, 3)) * 200.0
+    tmpl = '<vertex x="%.6f" y="%.6f" z="%.6f"/>'
+    assert _rows_to_xml(rows, tmpl) == per_row(rows, tmpl)
+
+
+def test_the_chunk_boundary_does_not_drop_or_repeat_a_row():
+    """The rows are formatted a hundred thousand at a time so the repeated
+    template stays small; the seam is the one place that could lose one."""
+    n = _XML_ROWS_PER_PASS * 2 + 7
+    rows = np.column_stack([np.arange(n), np.arange(n)]).astype(np.int64)
+    out = _rows_to_xml(rows, "%d:%d;")
+    assert out.count(";") == n
+    assert out.startswith("0:0;")
+    assert out.endswith(f"{n - 1}:{n - 1};")
+    assert f"{_XML_ROWS_PER_PASS - 1}:{_XML_ROWS_PER_PASS - 1};" \
+           f"{_XML_ROWS_PER_PASS}:{_XML_ROWS_PER_PASS};" in out
+
+
+def test_no_rows_at_all_is_an_empty_string():
+    assert _rows_to_xml(np.empty((0, 3), np.int64), "%d%d%d") == ""
