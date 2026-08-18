@@ -277,10 +277,11 @@ def generate(
             proj.flatten_under(plate.footprint, plate.levels.pocket)
         structure_clip = _structure_clip(clip_mm, plate, proj, grid)
 
-        # PLATEAU luse painted as-is; JAXA HRLULC fills only the cells PLATEAU
-        # doesn't classify; the rest stays the terrain colour. None when neither
-        # source covers the area — then the model is plain terrain-coloured and
-        # the credit must not name land-use sources it never used.
+        # PLATEAU luse painted as it stands; JAXA HRLULC fills the cells PLATEAU
+        # doesn't classify and the ones where it names an owner rather than a
+        # surface; the rest stays the terrain colour. None when neither source
+        # covers the area — then the model is plain terrain-coloured and the
+        # credit must not name land-use sources it never used.
         smooth_colors = False
         cat_grid = category_grid(grid)
         landuse = cat_grid is not None

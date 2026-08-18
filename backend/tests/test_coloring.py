@@ -7,15 +7,17 @@ a requested print size so what is left can actually be laid down.
 from __future__ import annotations
 
 import io
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
-from app.core import jaxa
+from app.core import coloring, jaxa
 from app.core.coloring import (
-    LUSE_CATEGORY, UNCLASSIFIED, _HOLE, _PALETTE, _mesh2_codes, _parse_luse,
-    category_grid, generalize,
+    LUSE_CATEGORY, UNCLASSIFIED, WEAK_CLASSES, _HOLE, _IDX, _PALETTE,
+    _WEAK_IDX, _mesh2_codes, _parse_luse, category_grid, generalize,
 )
+from app.core.terrain import ElevationGrid
 
 GML = """<?xml version="1.0" encoding="UTF-8"?>
 <core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0"
@@ -198,9 +200,62 @@ def test_generalize_is_deterministic():
 
 # ---- the composed grid -----------------------------------------------------
 
+def square_grid(n=8):
+    """A grid over SQUARE, so a parcel parsed from MEMBER covers all of it."""
+    return ElevationGrid(elev=np.zeros((n, n)),
+                         lons=np.linspace(139.0, 139.1, n),
+                         lats=np.linspace(35.0, 35.1, n))
+
+
 def test_a_grid_too_small_to_paint_is_skipped(make_grid_fn=None):
     """Guarded before anything is fetched, so this stays offline."""
-    from app.core.terrain import ElevationGrid
     tiny = ElevationGrid(elev=np.zeros((1, 1)), lons=np.array([139.0]),
                          lats=np.array([35.0]))
     assert category_grid(tiny) is None
+
+
+# ---- weak classes ----------------------------------------------------------
+
+def test_a_weak_class_paints_a_sentinel_rather_than_its_category():
+    """`category_grid` has to tell a weak cell from a firm one, so `_paint`
+    marks it instead of resolving it."""
+    rings = parse(MEMBER.format(code=214, outer=ring(SQUARE), holes=""))
+    with patch.object(coloring, "_load_rings", return_value=rings), \
+         patch.object(coloring, "process_map", return_value=[True]):
+        painted, all_loaded = coloring._paint(square_grid(), [("533900", "u")])
+    assert all_loaded
+    assert (painted == _WEAK_IDX[214]).any()
+    assert not (painted == _IDX[WEAK_CLASSES[214]]).any()
+
+
+def paint_as(painted, classes):
+    with patch.object(coloring, "_plateau_index_grid", return_value=painted), \
+         patch.object(coloring.jaxa, "class_grid", return_value=classes):
+        return category_grid(square_grid())
+
+
+def test_a_weak_cell_takes_the_reading_a_firm_one_would_not():
+    """214 公益施設用地 is one parcel for 皇居 and one for a city hall; only
+    the fallback can say which of them has a forest on it."""
+    painted = np.full((8, 8), _IDX["urban"], np.uint8)
+    painted[:, :4] = _WEAK_IDX[214]
+    out = paint_as(painted, np.full((8, 8), 8, np.uint8))  # 8 = 常緑広葉
+    assert (out[:, :4] == "forest").all()
+    assert (out[:, 4:] == "urban").all()
+
+
+@pytest.mark.parametrize("classes", [None, np.zeros((8, 8), np.uint8)],
+                         ids=["no tile at all", "tile with no data"])
+def test_a_weak_cell_keeps_its_luse_class_where_jaxa_is_silent(classes):
+    """Deferring is not discarding: with nothing to defer to, the sentinel has
+    to resolve back to the category the code maps to — never leak, never fall
+    through to the plain terrain colour."""
+    out = paint_as(np.full((8, 8), _WEAK_IDX[214], np.uint8), classes)
+    assert (out == WEAK_CLASSES[214]).all()
+
+
+def test_every_weak_class_is_a_class_that_exists():
+    assert set(WEAK_CLASSES) <= set(LUSE_CATEGORY)
+    assert set(WEAK_CLASSES.values()) <= set(_PALETTE)
+    # Sentinels have to sit above the palette, inside `_paint`'s 8-bit canvas.
+    assert all(len(_PALETTE) <= s < 256 for s in _WEAK_IDX.values())

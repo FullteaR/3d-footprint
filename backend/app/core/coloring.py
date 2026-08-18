@@ -1,17 +1,21 @@
-"""Terrain coloring: PLATEAU land use (luse), painted as-is.
+"""Terrain coloring: PLATEAU land use (luse), painted as it stands.
 
-One source, no post-processing. The PLATEAU data catalog maps the DEM grid's
-bbox to per-city luse CityGML files (one 2nd-level JIS mesh each); every file's
-LandUse parcels (都市計画基礎調査の土地利用現況) are stream-parsed once into a
-compact npz of polygon rings + class code, then rasterized straight onto the
-DEM grid in document order. The official class codes
-(codelists/Common_landUseType.xml) map to a small print palette.
+One source and no post-processing, bar the one exception below. The PLATEAU
+data catalog maps the DEM grid's bbox to per-city luse CityGML files (one
+2nd-level JIS mesh each); every file's LandUse parcels (都市計画基礎調査の土地
+利用現況) are stream-parsed once into a compact npz of polygon rings + class
+code, then rasterized straight onto the DEM grid in document order. The
+official class codes (codelists/Common_landUseType.xml) map to a small print
+palette.
 
 Parcels of unknown class (231 不明) and cells no parcel covers fall through
-to the JAXA HRLULC fallback (jaxa.py) — strictly gap-fill, painted just as
-literally: it never overrides a PLATEAU-classified cell. Cells neither source
-classifies keep the "terrain" label, i.e. the plain user-picked terrain
-colour. No smoothing, no sea stamping, no DEM-based corrections anywhere.
+to the JAXA HRLULC fallback (jaxa.py), painted just as literally. So do the
+cells of a weak class (WEAK_CLASSES): a handful of luse codes draw a property
+line rather than a surface, and there the fallback is the one source that can
+say what is actually on the ground. Everywhere else JAXA still never overrides
+a PLATEAU-classified cell. Cells neither source classifies keep the "terrain"
+label, i.e. the plain user-picked terrain colour. No smoothing, no sea
+stamping, no DEM-based corrections anywhere.
 
 The one optional post-process is `generalize`, and it is about the printer, not
 the data: it dissolves colour features finer than a requested print size, so
@@ -74,6 +78,23 @@ _PALETTE = [UNCLASSIFIED, "water", "forest", "field", "urban", "road", "bare",
             "wetland"]
 _IDX = {name: i for i, name in enumerate(_PALETTE)}
 _HOLE = 1  # ring-code sentinel for interior rings (real classes are >= 201)
+
+# Classes that draw an owner rather than a surface. 214 公益施設用地 is one
+# parcel for 皇居 (1.15 km2, 吹上御苑 and the inner moats inside it), one for
+# 明治神宮の杜, one for 愛宕山 — and also one per school, city hall and
+# hospital. Painting the whole class 市街地 loses the first kind; painting it
+# 緑 would lose the second. So a weak class defers to JAXA, which reads the
+# ground and separates them: over 389 parcels of central Tokyo, 340 come back
+# under 10% forest and stay built-up, while 皇居 reads 62% forest and 明治神宮
+# 87%. The luse category is kept as the answer for wherever JAXA is silent.
+WEAK_CLASSES: dict[int, str] = {214: "urban"}
+# Painted in place of the category so `category_grid` can tell a weak cell from
+# a firm one. Above the palette and inside `_paint`'s 8-bit canvas.
+_WEAK_IDX = {code: 255 - i for i, code in enumerate(WEAK_CLASSES)}
+_WEAK_MIN = min(_WEAK_IDX.values(), default=256)
+_WEAK_BACK = np.zeros(256, np.uint8)   # sentinel -> the category it falls back to
+for _code, _sentinel in _WEAK_IDX.items():
+    _WEAK_BACK[_sentinel] = _IDX[WEAK_CLASSES[_code]]
 
 _LANDUSE_TAG = "{http://www.opengis.net/citygml/landuse/2.0}LandUse"
 _CLASS_TAG = "{http://www.opengis.net/citygml/landuse/2.0}class"
@@ -192,8 +213,10 @@ def _warm_rings(code: str, url: str) -> bool:
 
 
 # Salt the painted-grid memo with the code->category mapping so editing the
-# mapping (or the palette) invalidates memoized grids but not the parsed rings.
-_MAP_SALT = hashlib.sha1(repr((sorted(LUSE_CATEGORY.items()), _PALETTE)).encode()).hexdigest()[:8]
+# mapping (or the palette, or which classes are weak) invalidates memoized
+# grids but not the parsed rings.
+_MAP_SALT = hashlib.sha1(repr((sorted(LUSE_CATEGORY.items()), _PALETTE,
+                               sorted(WEAK_CLASSES.items()))).encode()).hexdigest()[:8]
 
 
 def _paint(grid: ElevationGrid, files: list[tuple[str, str]]) -> tuple[np.ndarray, bool]:
@@ -232,9 +255,11 @@ def _paint(grid: ElevationGrid, files: list[tuple[str, str]]) -> tuple[np.ndarra
         ys = (coords[:, 1] - grid.lats[0]) * sy
         for f in range(len(feats) - 1):
             r0, r1 = int(feats[f]), int(feats[f + 1])
-            idx = _IDX[LUSE_CATEGORY.get(int(codes[r0]), UNCLASSIFIED)]
+            code_i = int(codes[r0])
+            idx = _IDX[LUSE_CATEGORY.get(code_i, UNCLASSIFIED)]
             if idx == 0:
                 continue  # 不明 (231) / unmapped class: leave unclassified
+            idx = _WEAK_IDX.get(code_i, idx)
             for r in range(r0, r1):
                 a, b = int(starts[r]), int(starts[r + 1])
                 draw.polygon(
@@ -245,7 +270,10 @@ def _paint(grid: ElevationGrid, files: list[tuple[str, str]]) -> tuple[np.ndarra
 
 
 def _plateau_index_grid(grid: ElevationGrid) -> np.ndarray | None:
-    """(ny, nx) palette-index grid from PLATEAU luse (0 = unclassified).
+    """(ny, nx) palette-index grid from PLATEAU luse.
+
+    0 = unclassified; an index at or above `_WEAK_MIN` is a weak class's
+    sentinel, for `category_grid` to resolve against JAXA.
 
     None when no luse file covers the bbox at all. The painted grid is
     memoized per (bbox, shape, file set), so the preview loop repaints only
@@ -337,23 +365,32 @@ def generalize(cats: np.ndarray, min_size_cells: float) -> np.ndarray:
 def category_grid(grid: ElevationGrid) -> np.ndarray | None:
     """(ny, nx) print-category labels for the DEM grid.
 
-    PLATEAU luse wherever it classifies a cell; JAXA HRLULC fills *only* the
-    cells PLATEAU leaves unclassified (it never overrides PLATEAU). Cells
-    neither source classifies keep the "terrain" label; None when neither
-    source covers the bbox at all (plain single-colour terrain).
+    PLATEAU luse wherever it classifies a cell firmly; JAXA HRLULC fills the
+    cells PLATEAU leaves unclassified, plus the cells of a weak class, where
+    luse names an owner and not a surface (WEAK_CLASSES). Cells neither source
+    classifies keep the "terrain" label; None when neither source covers the
+    bbox at all (plain single-colour terrain).
     """
     nx, ny = grid.lons.size, grid.lats.size
     if nx < 2 or ny < 2:
         return None
     idx = _plateau_index_grid(grid)
-    if idx is None or (idx == 0).any():
+    # Cells of a weak class (see WEAK_CLASSES) carry a sentinel rather than a
+    # category, and go to JAXA like an unpainted cell would.
+    back = None if idx is None else _WEAK_BACK[idx]
+    if idx is None or (idx == 0).any() or (back is not None and back.any()):
         classes = jaxa.class_grid(grid)
         if classes is not None:
             lut = np.zeros(256, np.uint8)
             for cls, cat in jaxa.CLASS_CATEGORY.items():
                 lut[cls] = _IDX[cat]
             fill = lut[classes]
-            idx = fill if idx is None else np.where(idx == 0, fill, idx)
+            idx = (fill if idx is None
+                   else np.where((idx == 0) | (back > 0), fill, idx))
     if idx is None:
         return None
+    # A weak cell JAXA had no reading for (no data, or no tile at all — the
+    # sentinel is then still standing) keeps its luse class after all.
+    if back is not None:
+        idx = np.where((back > 0) & ((idx == 0) | (idx >= _WEAK_MIN)), back, idx)
     return np.asarray(_PALETTE, dtype="<U8")[idx]
