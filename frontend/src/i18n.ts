@@ -113,6 +113,7 @@ const JA = {
   luUrban: "市街地",
   luRoad: "道路",
   luBare: "空地・荒地",
+  luWetland: "湿地",
 
   credits: "データ出典:",
   gsi: "国土地理院（地理院タイル）",
@@ -229,6 +230,7 @@ const EN: typeof JA = {
   luUrban: "Built-up",
   luRoad: "Roads",
   luBare: "Open & bare land",
+  luWetland: "Wetland",
 
   credits: "Data sources:",
   gsi: "Geospatial Information Authority of Japan (GSI Tiles)",

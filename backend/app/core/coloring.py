@@ -61,11 +61,16 @@ LUSE_CATEGORY: dict[int, str] = {
     224: "bare",    # 低未利用土地（空地、空家等）
     252: "bare",    # 非可住地
     263: "bare",    # 空地（その他①～④の区分なし）
-    # 231 不明 and anything unlisted stay unclassified.
+    # 231 不明 and anything unlisted stay unclassified. Nothing maps to
+    # "wetland": 205 lumps 低湿地 in with 原野・荒れ地・河川敷・海浜, so luse
+    # cannot name a wetland and only JAXA (class 13) ever paints that layer.
 }
 
 UNCLASSIFIED = "terrain"  # cells luse doesn't classify = plain terrain colour
-_PALETTE = [UNCLASSIFIED, "water", "forest", "field", "urban", "road", "bare"]
+# Palette order is `generalize`'s last tie-break, so a new layer goes on the
+# end: adding one can't change how the existing ones resolve against each other.
+_PALETTE = [UNCLASSIFIED, "water", "forest", "field", "urban", "road", "bare",
+            "wetland"]
 _IDX = {name: i for i, name in enumerate(_PALETTE)}
 _HOLE = 1  # ring-code sentinel for interior rings (real classes are >= 201)
 

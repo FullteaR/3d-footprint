@@ -29,7 +29,10 @@ YEAR = "2024"
 TILE_DEG = 0.1
 
 # HRLULC v25.04 class -> print category. 0 (no data) and anything unlisted
-# stay unclassified; wetland/tidal flat follow PLATEAU 205 その他自然地 -> bare.
+# stay unclassified; tidal flat follows PLATEAU 205 その他自然地 -> bare.
+# Wetland gets a layer of its own instead: it is neither open water nor bare
+# ground, it arrives in printable sheets rather than slivers (釧路湿原 is one
+# 49 km² patch), and no luse class can name it.
 CLASS_CATEGORY: dict[int, str] = {
     1: "water",    # Water bodies
     2: "urban",    # Built-up
@@ -43,7 +46,7 @@ CLASS_CATEGORY: dict[int, str] = {
     10: "bare",    # Bare
     11: "forest",  # Bamboo forest
     12: "bare",    # Solar panel
-    13: "bare",    # Wetland
+    13: "wetland", # Wetland
     14: "field",   # Greenhouse
     15: "bare",    # Rock reef and tidal flat
 }

@@ -115,6 +115,7 @@ const PLATE_MIN_MM = 5, PLATE_MAX_MM = 200;
 const legendOf = (t: Text): [string, string][] => [
   [t.luWater, "#4a80c0"], [t.luForest, "#3f7d3a"], [t.luFarm, "#c9d17a"],
   [t.luUrban, "#b0b0b0"], [t.luRoad, "#6f6f6f"], [t.luBare, "#cdbb8f"],
+  [t.luWetland, "#7f9e86"],
 ];
 
 // Round map scales — the 1/1.5/2/2.5/3/4/5/7.5 ladder per decade, over the
