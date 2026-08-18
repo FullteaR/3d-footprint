@@ -53,6 +53,7 @@ LUSE_CATEGORY: dict[int, str] = {
     222: "urban",   # その他③（平面駐車場）
     251: "urban",   # 可住地
     261: "urban",   # 宅地（住宅・商業等の区分なし）
+    264: "urban",   # 建築敷地
     215: "road",    # 道路用地（道路、駅前広場等）
     262: "road",    # 道路・鉄軌道敷
     205: "bare",    # その他自然地（原野、荒れ地、低湿地、河川敷、海浜等）
@@ -61,8 +62,8 @@ LUSE_CATEGORY: dict[int, str] = {
     224: "bare",    # 低未利用土地（空地、空家等）
     252: "bare",    # 非可住地
     263: "bare",    # 空地（その他①～④の区分なし）
-    # 231 不明 and anything unlisted stay unclassified. Nothing maps to
-    # "wetland": 205 lumps 低湿地 in with 原野・荒れ地・河川敷・海浜, so luse
+    # 231 不明, 265 その他 and anything unlisted stay unclassified. Nothing maps
+    # to "wetland": 205 lumps 低湿地 in with 原野・荒れ地・河川敷・海浜, so luse
     # cannot name a wetland and only JAXA (class 13) ever paints that layer.
 }
 
