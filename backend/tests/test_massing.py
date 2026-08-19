@@ -1,8 +1,9 @@
 """Printability massing: footprint algebra and the prism it extrudes.
 
 At print scale a PLATEAU feature's detail falls below the nozzle width and
-collapses, so a feature is reduced to a footprint prism with nothing left
-thinner than `min_feature`. These are the rules that decide what survives.
+collapses. Zoomed out far enough, a feature is reduced to a footprint prism with
+nothing left thinner than `min_feature`; these are the rules that decide what
+survives that, and the rule that decides when it is the right massing at all.
 """
 from __future__ import annotations
 
@@ -10,7 +11,10 @@ import numpy as np
 import pytest
 from shapely.geometry import MultiPolygon, Polygon, box
 
-from app.core.massing import blocks_of, footprint_of, outline_parts, printable, prism
+from app.core.massing import (
+    SHAPE_LIMIT_M, blocks_of, footprint_of, keeps_its_shape, outline_parts,
+    printable, prism,
+)
 
 MIN = 0.8   # a 0.4 mm nozzle's minimum printable width
 
@@ -222,3 +226,29 @@ def test_with_no_minimum_width_only_buildings_that_really_touch_merge():
     touching = [box(0.0, 0.0, 10.0, 10.0), box(9.9, 0.0, 20.0, 10.0)]
     assert len(blocks_of(apart, 0.0)) == 2
     assert len(blocks_of(touching, 0.0)) == 1
+
+
+# ---- which massing -----------------------------------------------------------
+
+def test_a_building_wider_than_the_nozzle_keeps_its_own_shape(make_proj, flat_grid):
+    """Zoomed in the nozzle is a few metres of ground, so a podium, a setback or
+    a splayed foot are all things the printer can actually lay down."""
+    proj = make_proj(flat_grid, size_mm=120.0)
+    assert MIN / proj.scale < SHAPE_LIMIT_M
+    assert keeps_its_shape(proj, MIN)
+
+
+def test_a_building_narrower_than_the_nozzle_has_no_shape_left_to_keep(
+        make_proj, flat_grid):
+    """Zoomed out the nozzle is tens of metres: a building's outline, its height
+    and the street beside it are all finer than one printed line, and what
+    prints crisply is the merged block rather than any of them."""
+    proj = make_proj(flat_grid, size_mm=40.0)
+    assert MIN / proj.scale > SHAPE_LIMIT_M
+    assert not keeps_its_shape(proj, MIN)
+
+
+def test_with_the_massing_switched_off_the_shape_is_always_kept(make_proj,
+                                                                flat_grid):
+    """No minimum width is no nozzle to be narrower than."""
+    assert keeps_its_shape(make_proj(flat_grid, size_mm=40.0), 0.0)

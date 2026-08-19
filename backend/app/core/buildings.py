@@ -10,11 +10,20 @@ Each building's best available LOD (LOD2 semantic surfaces
 `bldg:boundedBy/{RoofSurface,WallSurface,GroundSurface}`, else the LOD1
 `bldg:lod1Solid` prism) is parsed once and cached. For printing, fine roof/wall
 detail is below the FDM nozzle and would collapse, so `building_body` does NOT
-print the raw geometry: each building is reduced to its **footprint** (the union
+print the raw geometry. What it does instead depends on the scale, and the
+scale alone (`massing.keeps_its_shape`).
+
+Zoomed in, a building spans several nozzle widths and its own shape is worth
+printing: the geometry is kept and thickened in three dimensions until nothing
+is finer than `min_feature_mm` (voxel.py), so a podium stays a podium instead of
+being extruded to the height of the tower on it, and Tokyo Tower comes out as
+Tokyo Tower rather than as the 127 m column of its feet.
+
+Zoomed out, it is not: each building is reduced to its **footprint** (the union
 of its triangles in plan) and the footprints are merged into **city blocks** —
-anything closer together than the minimum printable width `min_feature_mm`
-becomes one flat-topped prism, and anything further apart stays a gap, so the
-streets wide enough to print survive as streets (the massing is in massing.py).
+anything closer together than `min_feature_mm` becomes one flat-topped prism,
+and anything further apart stays a gap, so the streets wide enough to print
+survive as streets (massing.py).
 
 Blocks, not individual buildings, because the scale demands it: a whole city on
 a 120 mm plate is around 1:100,000, where one nozzle width is ~80 m of ground
@@ -56,7 +65,10 @@ from .export import Body
 from .net import atomic_savez, session
 from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
-from .massing import blocks_of, footprint_of, outline_parts, polygon_parts, prism
+from .massing import (
+    blocks_of, footprint_of, keeps_its_shape, outline_parts, polygon_parts, prism,
+)
+from .voxel import solid_from
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
 MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
@@ -356,6 +368,23 @@ class PlateauBuildingProvider:
         inside = shapely.contains_xy(clip, xy[:, 0], xy[:, 1])
         keep_b = np.zeros(nb, bool)
         keep_b[vbid[inside]] = True
+
+        # Zoomed in far enough that a building still has a shape of its own, it
+        # is kept and thickened rather than flattened into the prism of its plan
+        # (see massing.keeps_its_shape). Height is measured from the building's
+        # own ground and re-based onto the terrain the model actually has, so it
+        # sits on the relief rather than at whatever elevation PLATEAU recorded.
+        if keeps_its_shape(proj, min_feature_mm):
+            kept = faces[keep_b[vbid[faces[:, 0]]]]
+            if len(kept) == 0:
+                return None
+            xyz = np.column_stack([
+                xy[:, 0], xy[:, 1],
+                surface[vbid] + (h - ground[vbid]) * proj.scale * height_scale,
+            ])
+            shaped = solid_from(xyz, kept, min_feature_mm, proj=proj,
+                                embed=EMBED_MM, outline=clip)
+            return None if shaped is None else Body(shaped, "building")
 
         # Group faces by building so each footprint is unioned independently.
         face_bid = vbid[faces[:, 0]]

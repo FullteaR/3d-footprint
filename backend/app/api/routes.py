@@ -211,10 +211,14 @@ def generate(
 
     `min_feature_mm` is the narrowest thing the printer can lay down, and it
     drives the whole printability massing: 0 switches that off and prints the
-    footprints as they come. `include_buildings` masses PLATEAU buildings into
-    city blocks and bridges into decks on pillars, and cuts the 幹線街路 back
-    through the massing at that width — the only way an arterial reads below
-    about 1:40,000. Neither takes a threshold; see roads.py. Past
+    shapes as they come. `include_buildings` masses PLATEAU buildings and
+    bridges — zoomed in each keeps its own shape, thickened until nothing is
+    finer than that width; zoomed out, where the nozzle is tens of metres of
+    ground and nothing of a building's own shape can print, they merge into
+    flat-topped city blocks instead (massing.keeps_its_shape) — and cuts the
+    幹線街路 back through the massing at the same width, the only way an
+    arterial reads below about 1:40,000. None of it takes a threshold anyone
+    chose; see roads.py. Past
     `STRUCTURE_LIMIT_M_PER_MM` the whole structure layer is skipped, and the
     出典 then names only the sources the model really used.
 
@@ -310,9 +314,10 @@ def generate(
         structures = include_buildings and _structures_can_show(proj)
         if structures:
             # Bridges/elevated structures share the buildings toggle and colour
-            # layer; both are massed into printable blocks (min_feature_mm sets
-            # the minimum printable width), differing only in placement: buildings
-            # sit on the surface, bridges keep their real deck elevation + pillars.
+            # layer; both take the same fork on scale (massing.keeps_its_shape)
+            # and differ only in placement: buildings are snapped onto the
+            # terrain surface, bridges keep their real deck elevation and are
+            # tied down to it.
             # 大通りで街区を割る. Below ~1:40,000 no real road is a nozzle wide,
             # so the arterials are cut in deliberately rather than waited for
             # (roads.py). Nothing to decide: where there is road data and a

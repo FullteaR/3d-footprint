@@ -15,12 +15,19 @@ at its true height above the (exaggerated) relief, rising and falling with
 `vertical_scale` exactly as the surrounding terrain does.
 
 For printing, the raw deck/girder geometry is far below the FDM nozzle and a
-deck floating in mid-air cannot be printed at all. So a bridge is NOT printed
-as-is: each connected span is reduced to its footprint and rebuilt as a
-printable solid — a thick deck slab at the real deck elevation, plus stout
-pillars dropped from the deck down to the terrain surface so nothing floats and
-"a bridge is here" still reads (see massing.py). Short spans become a single
-solid block to the ground. `min_feature_mm` sets the minimum printable width.
+deck floating in mid-air cannot be printed at all. So a bridge is never printed
+as-is, and what it becomes depends on the scale (`massing.keeps_its_shape`).
+
+Zoomed in, the towers, cables and piers are all wider than the nozzle and the
+structure keeps its own shape, thickened until nothing is finer than
+`min_feature_mm` (voxel.py). Piers in the data are what it stands on; where
+PLATEAU modelled a deck with nothing under it, props are dropped to the terrain
+at `PILLAR_SPACING_MM`, because nothing floating can be printed.
+
+Zoomed out, none of that survives a printed line tens of metres wide, so each
+connected span is reduced to its footprint and rebuilt as a thick deck slab at
+the real deck elevation plus stout pillars to the terrain (massing.py). Short
+spans become a single solid block to the ground.
 
 Geometry parsing/triangulation is shared with the building pipeline; only the
 feature namespace and the placement differ. Triangulated polygons are cached per
@@ -44,7 +51,8 @@ from .export import Body
 from .net import atomic_savez, session
 from .parallel import process_map
 from .plateau import fetch_datacatalog_cities
-from .massing import footprint_of, printable, prism
+from .massing import footprint_of, keeps_its_shape, printable, prism
+from .voxel import solid_from
 from .mesh import Projection
 
 EMBED_MM = 0.5            # how far a pillar/block base sinks into the terrain
@@ -235,6 +243,19 @@ class PlateauBridgeProvider:
         )]
         if len(faces) == 0:
             return None
+
+        # Zoomed in far enough that the structure still has a shape of its own,
+        # it is kept and thickened rather than reduced to a deck slab (see
+        # massing.keeps_its_shape): the towers, the cables and the piers are all
+        # wider than the nozzle there, and a suspension bridge reduced to its
+        # footprint is a plate on stilts at the wrong height.
+        if keeps_its_shape(proj, min_feature_mm):
+            xyz = np.column_stack([xy[:, 0], xy[:, 1], z_real])
+            shaped = solid_from(xyz, faces, min_feature_mm, proj=proj,
+                                embed=EMBED_MM, spacing=PILLAR_SPACING_MM,
+                                outline=clip)
+            # Bridges share the "building" colour layer (one structure category).
+            return None if shaped is None else Body(shaped, "building")
 
         # One footprint polygon per connected span; mass each into deck + pillars.
         fp_all = footprint_of(xy, faces)

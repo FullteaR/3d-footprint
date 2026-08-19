@@ -14,9 +14,13 @@ lxml==5.3.0
 # M6: PLATEAU LOD2 building polygon triangulation
 mapbox-earcut==1.0.3
 
-# Printability massing: 2D footprint algebra (union/buffer/simplify) for the
-# building/bridge デフォルメ
+# Printability massing: the 2D outline algebra the road grooves and the
+# nameplate still work in (core/roads.py, core/nameplate.py)
 shapely==2.0.6
+
+# Printability massing in 3D (core/voxel.py): marching cubes over the signed
+# distance of the occupancy lattice. scipy supplies the distance transforms.
+scikit-image==0.25.0
 
 # 銘板 (nameplate): uploaded SVG -> path outlines (core/nameplate.py)
 svgelements==1.9.6

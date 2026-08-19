@@ -6,6 +6,10 @@ geometry we reduce each feature to a clean, watertight *footprint prism* — its
 outline extruded between two heights — while enforcing a minimum printable
 feature width so nothing is left thinner than the nozzle can resolve.
 
+This is the massing for a model zoomed far enough out that a building has no
+printable shape of its own; `keeps_its_shape` decides that, and where a feature
+does still have one, voxel.py keeps it instead.
+
 Two paths, differing in what they do with a feature *smaller* than that width.
 A bridge goes through `printable`, which drops it as noise — a stray speck of
 deck is not a bridge. A building cannot: below about 1:20,000 nearly every real
@@ -26,6 +30,35 @@ import shapely
 import trimesh
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.geometry.polygon import orient
+
+
+# Ground metres one nozzle covers, past which a building is narrower than the
+# line the printer can lay down and has no shape of its own left to print. A
+# typical Japanese building is about ten metres across.
+SHAPE_LIMIT_M = 10.0
+
+
+def keeps_its_shape(proj, min_feature: float) -> bool:
+    """Whether a feature is still big enough for its own shape to be worth printing.
+
+    There are two massings and the scale picks between them, not taste. Zoomed
+    in, a building spans several nozzle widths and everything about it that is
+    not its footprint — a podium, a setback, a tower's splayed legs — can be
+    laid down, so the geometry is kept and thickened in three dimensions
+    (voxel.py). Zoomed out, one nozzle is tens of metres of ground: a Tokyo
+    building is ten metres across and ten metres from its neighbour, so its
+    outline, its height and the street beside it are all finer than a single
+    printed line. Nothing of its own shape can survive that, and resampling it
+    into a lattice only turns a city block into a lump of porridge. What prints
+    crisply there is the merged block itself — an exact polygon with straight
+    edges and a flat top, which is what this module builds.
+
+    Both are the same bargain the rest of the massing makes; they differ only in
+    what is left worth keeping once the nozzle has had its say.
+    """
+    if min_feature <= 0:
+        return True                      # no nozzle to be narrower than
+    return min_feature / proj.scale <= SHAPE_LIMIT_M
 
 
 def footprint_of(xy: np.ndarray, faces: np.ndarray):
