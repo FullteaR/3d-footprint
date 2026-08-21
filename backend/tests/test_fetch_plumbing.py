@@ -1,8 +1,9 @@
-"""Cache writes and worker pools — the plumbing under every data fetcher.
+"""Cache writes, worker pools and file dedupe — the plumbing under every fetcher.
 
 Nothing here goes near the network: what matters is that a cache file is never
-readable half-written, that one key is only fetched once, and that the pools
-keep job order and stay strictly an optimization.
+readable half-written, that one key is only fetched once, that the pools keep
+job order and stay strictly an optimization, and that a PLATEAU mesh published
+by several cities is still rendered once.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import threading
 import numpy as np
 import pytest
 
-from app.core import parallel
+from app.core import parallel, plateau
 from app.core.net import atomic_savez, atomic_write_bytes, keyed_lock, session
 from app.core.parallel import process_map, thread_map
 
@@ -145,3 +146,77 @@ def test_process_map_really_uses_the_pool():
     pids = process_map(os.getpid, [(), (), (), ()])
     assert len(pids) == 4
     assert os.getpid() not in pids
+
+
+# ---- one PLATEAU file per distinct content ---------------------------------
+
+def _distinct(monkeypatch, tmp_path, urls, contents, cached=(), fails=()):
+    """Drive `plateau.distinct_files` over an in-memory set of files.
+
+    Returns (what it yielded, what the parse workers were asked to warm). A
+    content of "" stands for a file that parsed to nothing.
+    """
+    warmed: list[tuple[str, str]] = []
+
+    def fake_process_map(fn, jobs):
+        warmed.extend((mesh, url) for _load, mesh, url in jobs)
+        return [(mesh, url) not in fails for _load, mesh, url in jobs]
+
+    monkeypatch.setattr(plateau, "process_map", fake_process_map)
+    for mesh, url in cached:
+        (tmp_path / f"{mesh}_{url}").write_bytes(b"")
+    out = list(plateau.distinct_files(
+        urls,
+        cache_path=lambda mesh, url: tmp_path / f"{mesh}_{url}",
+        load=lambda mesh, url: contents.get((mesh, url)),
+        key=lambda content: content.encode() or None,
+    ))
+    return out, warmed
+
+
+def test_the_same_content_from_two_cities_is_read_once(monkeypatch, tmp_path):
+    """A mesh on a city border is published by every city covering it, and in
+    some datasets each copy is the whole mesh: rendering both draws it twice."""
+    out, _ = _distinct(
+        monkeypatch, tmp_path,
+        {"53393599": ["from-ota", "from-shinagawa"], "53393590": ["west"]},
+        {("53393599", "from-ota"): "east", ("53393599", "from-shinagawa"): "east",
+         ("53393590", "west"): "west"},
+    )
+    assert out == ["east", "west"]      # catalog order, duplicate dropped
+
+
+def test_a_file_that_would_not_parse_is_left_out(monkeypatch, tmp_path):
+    """A download that failed leaves no cache, and is skipped rather than
+    retried here — the next request is the second attempt."""
+    out, _ = _distinct(
+        monkeypatch, tmp_path,
+        {"53393599": ["good", "broken"]},
+        {("53393599", "good"): "kept", ("53393599", "broken"): "never read"},
+        fails={("53393599", "broken")},
+    )
+    assert out == ["kept"]
+
+
+def test_only_the_uncached_files_go_to_the_parse_workers(monkeypatch, tmp_path):
+    """The pool exists to pay the parse once; a cached mesh is already paid."""
+    _, warmed = _distinct(
+        monkeypatch, tmp_path,
+        {"53393599": ["cached", "fresh"]},
+        {("53393599", "cached"): "a", ("53393599", "fresh"): "b"},
+        cached={("53393599", "cached")},
+    )
+    assert warmed == [("53393599", "fresh")]
+
+
+def test_a_file_holding_nothing_does_not_stand_in_for_the_next_one(
+        monkeypatch, tmp_path):
+    """An empty parse is not content, so it must not claim a digest — two of
+    them in a row would otherwise hide whatever came after."""
+    out, _ = _distinct(
+        monkeypatch, tmp_path,
+        {"53393599": ["empty", "also-empty", "real"]},
+        {("53393599", "empty"): "", ("53393599", "also-empty"): "",
+         ("53393599", "real"): "buildings"},
+    )
+    assert out == ["buildings"]

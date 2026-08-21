@@ -33,6 +33,7 @@ from shapely import affinity
 from shapely.geometry.polygon import orient
 
 from .export import Body
+from .massing import geoms
 from .nameplate import _fill_geom, _open_pinches, _tri_2d
 
 _FONT_CANDIDATES = (
@@ -240,7 +241,7 @@ def _engrave_mesh(
     # with ink on the left (kept through the clip), so a left-pointing wall
     # normal faces into the groove void.
     lines = boundary.intersection(region)
-    for ls in getattr(lines, "geoms", [lines]):
+    for ls in geoms(lines):
         if not isinstance(ls, shapely.LineString) or ls.length < 1e-9:
             continue
         c = np.asarray(ls.coords)
@@ -325,7 +326,7 @@ def engrave_credit(
         return
     # Ring direction is load-bearing for the wall winding (see _engrave_mesh):
     # exteriors CCW, holes CW puts the ink interior on the left throughout.
-    polys = [orient(p, 1.0) for p in getattr(g, "geoms", [g])
+    polys = [orient(p, 1.0) for p in geoms(g)
              if isinstance(p, shapely.Polygon) and not p.is_empty]
     if not polys:
         return

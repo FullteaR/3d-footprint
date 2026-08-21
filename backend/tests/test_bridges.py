@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from shapely.geometry import box
 
-from app.core import bridges
+from app.core import bridges, plateau
 from app.core.bridges import PlateauBridgeProvider
 
 MIN = 0.8
@@ -49,10 +49,10 @@ def structure(*parts):
 
 def massed(proj, *parts, min_feature=MIN, clip=None):
     geo = structure(*parts)
-    with patch.object(PlateauBridgeProvider, "_brid_urls",
-                      lambda self, codes: {"53393599": ["u"]}), \
+    with patch.object(plateau, "file_urls",
+                      lambda package, codes: {"53393599": ["u"]}), \
          patch.object(bridges, "_geometry", lambda m, u: geo), \
-         patch.object(bridges, "process_map", lambda fn, jobs: [True] * len(jobs)):
+         patch.object(plateau, "process_map", lambda fn, jobs: [True] * len(jobs)):
         return PlateauBridgeProvider().bridge_body(proj, min_feature, clip=clip)
 
 
@@ -111,8 +111,7 @@ def test_a_bridge_outside_the_print_is_not_in_it(flat_proj):
 
 
 def test_no_bridges_at_all_is_no_body(flat_proj):
-    with patch.object(PlateauBridgeProvider, "_brid_urls",
-                      lambda self, codes: {}):
+    with patch.object(plateau, "file_urls", lambda package, codes: {}):
         assert PlateauBridgeProvider().bridge_body(flat_proj, MIN) is None
 
 

@@ -19,7 +19,7 @@ from shapely.geometry import box
 
 from unittest.mock import patch
 
-from app.core import buildings
+from app.core import buildings, plateau
 from app.core.buildings import EMBED_MM, PlateauBuildingProvider, _blocks
 
 MIN = 0.8            # a 0.4 mm nozzle's minimum printable width
@@ -137,10 +137,10 @@ def city(*blocks):
 
 def provider_body(proj, *blocks, height_scale=1.0, min_feature=MIN, clip=None):
     geo = city(*blocks)
-    with patch.object(PlateauBuildingProvider, "_bldg_urls",
-                      lambda self, codes: {"53393599": ["u"]}), \
+    with patch.object(plateau, "file_urls",
+                      lambda package, codes: {"53393599": ["u"]}), \
          patch.object(buildings, "_geometry", lambda m, u: geo), \
-         patch.object(buildings, "process_map", lambda fn, jobs: [True] * len(jobs)):
+         patch.object(plateau, "process_map", lambda fn, jobs: [True] * len(jobs)):
         return PlateauBuildingProvider().building_body(
             proj, height_scale, min_feature, clip=clip)
 
@@ -197,8 +197,7 @@ def test_a_building_straddling_the_outline_is_cut_flush_with_it(flat_proj):
 
 
 def test_no_buildings_at_all_is_no_body(flat_proj):
-    with patch.object(PlateauBuildingProvider, "_bldg_urls",
-                      lambda self, codes: {}):
+    with patch.object(plateau, "file_urls", lambda package, codes: {}):
         assert PlateauBuildingProvider().building_body(flat_proj, 1.0, MIN) is None
 
 

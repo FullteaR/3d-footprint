@@ -491,19 +491,27 @@ export function App() {
     if (bboxRef.current) applyBbox(bboxRef.current);
   }, [applyBbox]);
 
-  // Generation only runs on the button, not on every tweak.
-  async function createModel() {
+  // Both buttons post the same form to the same endpoint and differ only in
+  // the format they ask for and what they do with the answer; the busy flag,
+  // the status line and the backend's error detail are shared.
+  async function generate(
+    outFmt: string,
+    kind: "generating" | "downloading",
+    receive: (resp: Response) => Promise<void>,
+  ) {
     if (!file) {
       setStatus({ kind: "needFile" });
       return;
     }
     setBusy(true);
-    setStatus({ kind: "generating" });
+    setStatus({ kind });
     try {
-      const resp = await fetch("/api/generate", { method: "POST", body: buildForm("glb") });
-      if (!resp.ok) throw new Error(((await resp.json().catch(() => ({}))) as any).detail ?? `HTTP ${resp.status}`);
-      setGlb(await resp.arrayBuffer());
-      setStatus(null);
+      const resp = await fetch("/api/generate", { method: "POST", body: buildForm(outFmt) });
+      if (!resp.ok) {
+        const body = (await resp.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(body.detail ?? `HTTP ${resp.status}`);
+      }
+      await receive(resp);
     } catch (e) {
       setStatus({ kind: "error", detail: (e as Error).message });
     } finally {
@@ -511,16 +519,15 @@ export function App() {
     }
   }
 
-  async function download() {
-    if (!file) {
-      setStatus({ kind: "needFile" });
-      return;
-    }
-    setBusy(true);
-    setStatus({ kind: "downloading" });
-    try {
-      const resp = await fetch("/api/generate", { method: "POST", body: buildForm(fmt) });
-      if (!resp.ok) throw new Error(((await resp.json().catch(() => ({}))) as any).detail ?? `HTTP ${resp.status}`);
+  // Generation only runs on the button, not on every tweak.
+  const createModel = () =>
+    generate("glb", "generating", async (resp) => {
+      setGlb(await resp.arrayBuffer());
+      setStatus(null);
+    });
+
+  const download = () =>
+    generate(fmt, "downloading", async (resp) => {
       const ext = fmt === "stl_multi" ? "zip" : fmt;
       const url = URL.createObjectURL(await resp.blob());
       const a = document.createElement("a");
@@ -529,12 +536,7 @@ export function App() {
       a.click();
       URL.revokeObjectURL(url);
       setStatus({ kind: "downloaded" });
-    } catch (e) {
-      setStatus({ kind: "error", detail: (e as Error).message });
-    } finally {
-      setBusy(false);
-    }
-  }
+    });
 
   // Refuse an oversized file here rather than after uploading it. The server
   // enforces the same ceilings (MAX_GPX_BYTES / MAX_SVG_BYTES in

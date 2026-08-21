@@ -56,6 +56,18 @@ class Projection:
         """Inverse of y_of: print mm -> latitude."""
         return self.lat0 + y / (_M_PER_DEG_LAT * self.scale)
 
+    def grid_box(self) -> shapely.Polygon:
+        """The fetched grid rectangle in print mm — the default model outline.
+
+        What a plain rect prints as, and what every layer clips to when the
+        region has no outline of its own.
+        """
+        min_lon, min_lat, max_lon, max_lat = self.grid.bbox
+        return shapely.box(
+            float(self.x_of(min_lon)), float(self.y_of(min_lat)),
+            float(self.x_of(max_lon)), float(self.y_of(max_lat)),
+        )
+
     def z_of(self, elev):
         return (elev - self.emin) * self.scale * self.vertical_scale
 

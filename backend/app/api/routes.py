@@ -87,11 +87,8 @@ def _plate_plan(
 
     # The plain-rect path never rotates, so its model is the fetched grid
     # itself (which can snap a hair wider than the requested bbox).
-    outline_mm = (
-        box(0.0, 0.0, float(proj.x_of(proj.grid.lons.max())),
-            float(proj.y_of(proj.grid.lats.max())))
-        if region.is_plain else region.outline_print_mm(proj)
-    )
+    outline_mm = (proj.grid_box() if region.is_plain
+                  else region.outline_print_mm(proj))
     model = to_plate_frame(outline_mm.buffer(-0.2), at)
     ink = plate_ink(svg, inset_plate_outline(
         clamp_side(width_mm), clamp_side(depth_mm), model
@@ -132,15 +129,7 @@ def _structures_can_show(proj) -> bool:
     return 1.0 / proj.scale <= STRUCTURE_LIMIT_M_PER_MM
 
 
-def _grid_box(proj, grid):
-    """The fetched grid rectangle in print mm — the plain-rect model outline."""
-    return box(
-        float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
-        float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
-    )
-
-
-def _structure_clip(clip_mm, plate: PlatePlan | None, proj, grid):
+def _structure_clip(clip_mm, plate: PlatePlan | None, proj):
     """The outline buildings and bridges are cut to, minus the 銘板.
 
     Nothing stands on the plaque. The map under it has just been routed out
@@ -154,13 +143,13 @@ def _structure_clip(clip_mm, plate: PlatePlan | None, proj, grid):
     if plate is None:
         return clip_mm
     if clip_mm is None:            # plain rect: the fetched grid is the outline
-        clip_mm = _grid_box(proj, grid)
+        clip_mm = proj.grid_box()
     return clip_mm.difference(
         transform(lambda x, y: (proj.x_of(x), proj.y_of(y)), plate.footprint)
     )
 
 
-def _building_clip(structure_clip, roads, proj, grid):
+def _building_clip(structure_clip, roads, proj):
     """The structure outline with the road grooves taken out of it as well.
 
     Buildings only: a bridge deck *is* a road, so cutting it along the road it
@@ -170,8 +159,122 @@ def _building_clip(structure_clip, roads, proj, grid):
     if roads is None or roads.is_empty:
         return structure_clip
     if structure_clip is None:
-        structure_clip = _grid_box(proj, grid)
+        structure_clip = proj.grid_box()
     return structure_clip.difference(roads)
+
+
+def _terrain_bodies(proj, min_color_mm: float, clip_mm) -> tuple[list[Body], bool]:
+    """The terrain as one solid per colour, and whether land use was painted.
+
+    PLATEAU luse is painted as it stands; JAXA HRLULC fills the cells PLATEAU
+    doesn't classify and the ones where it names an owner rather than a
+    surface; the rest stays the terrain colour. Neither source covering the
+    area means plain terrain-coloured ground — and the credit must then not
+    name land-use sources the model never used, which is what the flag is for.
+    """
+    cat_grid = category_grid(proj.grid)
+    landuse = cat_grid is not None
+    smooth_colors = False
+    if landuse and min_color_mm > 0:
+        # Colour detail is set in print mm, independently of the terrain's:
+        # one DEM cell is a fraction of a mm, far under what a multi-material
+        # printer resolves, so anything finer than `min_color_mm` is
+        # dissolved before the mesh is cut.
+        grid = proj.grid
+        cell_mm = min(
+            float(proj.x_of(grid.lons[1]) - proj.x_of(grid.lons[0])),
+            float(proj.y_of(grid.lats[1]) - proj.y_of(grid.lats[0])),
+        )
+        if cell_mm > 0:
+            cat_grid = generalize(cat_grid, min_color_mm / cell_mm)
+            smooth_colors = True
+    # Generalised colours get the contour cut too: dissolving fine features
+    # is only half the job, the borders still have to leave the grid (cells
+    # cut along a marching-squares polyline, then straightened) or the
+    # colours read as a mosaic of squares. Painting as-is (the slider at 0)
+    # keeps the raw cell edges, detail and all.
+    return terrain_solid(proj, cat_grid, naturalize=smooth_colors, clip=clip_mm), landuse
+
+
+def _structure_bodies(
+    proj, building_scale: float, min_feature_mm: float, clip_mm, structure_clip,
+) -> list[Body]:
+    """The PLATEAU structure layer: buildings and bridges, split by the arterials.
+
+    Bridges/elevated structures share the buildings toggle and colour layer;
+    both take the same fork on scale (massing.keeps_its_shape) and differ only
+    in placement: buildings are snapped onto the terrain surface, bridges keep
+    their real deck elevation and are tied down to it.
+
+    大通りで街区を割る. Below ~1:40,000 no real road is a nozzle wide, so the
+    arterials are cut in deliberately rather than waited for (roads.py).
+    Nothing to decide: where there is road data and a minimum feature width,
+    the 幹線街路 are the first thing that width is spent on. `road_cut` returns
+    None where PLATEAU has no tran.
+    """
+    roads = (
+        PlateauRoadProvider().road_cut(
+            proj, min_feature_mm,
+            outline=clip_mm if clip_mm is not None else proj.grid_box(),
+        )
+        if min_feature_mm > 0 else None
+    )
+    bodies: list[Body] = []
+    building_body = PlateauBuildingProvider().building_body(
+        proj, building_scale, min_feature_mm,
+        clip=_building_clip(structure_clip, roads, proj),
+    )
+    if building_body is not None:
+        bodies.append(building_body)
+    bridge_body = PlateauBridgeProvider().bridge_body(
+        proj, min_feature_mm, clip=structure_clip
+    )
+    if bridge_body is not None:
+        bodies.append(bridge_body)
+    return bodies
+
+
+def _track_bodies(
+    track, region: Region, proj, clip_ll,
+    width_mm: float, height_mm: float, min_feature_mm: float,
+) -> list[Body]:
+    """The GPX ridge, clipped to the terrain that was actually built.
+
+    A custom outline may cut the track, so clipping to it is what keeps the
+    ridge from overhanging the base; each in-area piece becomes its own sweep.
+    The ridge is kept at least one nozzle wide so it does not split.
+    """
+    extent = proj.grid.bbox
+    if region.is_plain:
+        segments = clip_track(track, extent)
+    else:
+        # Outline ∩ fetched grid: the outline can poke a sub-pixel past the
+        # DEM crop at the corners that touch the fetch bbox.
+        segments = clip_track_to_polygon(track, clip_ll.intersection(box(*extent)))
+    ridges = []
+    for seg in segments:
+        try:
+            ridges.append(track_ridge(
+                seg, proj, max(width_mm, min_feature_mm), height_mm
+            ))
+        except ValueError:
+            pass  # sliver that only grazes the border: nothing to sweep
+    if not ridges:
+        return []
+    return [Body(trimesh.util.concatenate(ridges), "track")]
+
+
+def _front_edge(region: Region, proj) -> tuple[float, float]:
+    """The x span of the model's front bottom edge, in the print frame.
+
+    The front edge lies on y=0 there, and this is what the 銘板 and the 出典
+    stamp are laid out along (a hexagon's flat bottom edge is its middle half).
+    """
+    if region.is_plain:
+        return 0.0, float(proj.x_of(proj.grid.bbox[2]))
+    hw, _ = region.half_extents_m
+    w = 2.0 * hw * proj.scale
+    return (0.25 * w, 0.75 * w) if region.shape == "hex" else (0.0, w)
 
 
 @router.post("/generate")
@@ -279,112 +382,29 @@ def generate(
         )
         if plate is not None:
             proj.flatten_under(plate.footprint, plate.levels.pocket)
-        structure_clip = _structure_clip(clip_mm, plate, proj, grid)
+        structure_clip = _structure_clip(clip_mm, plate, proj)
 
-        # PLATEAU luse painted as it stands; JAXA HRLULC fills the cells PLATEAU
-        # doesn't classify and the ones where it names an owner rather than a
-        # surface; the rest stays the terrain colour. None when neither source
-        # covers the area — then the model is plain terrain-coloured and the
-        # credit must not name land-use sources it never used.
-        smooth_colors = False
-        cat_grid = category_grid(grid)
-        landuse = cat_grid is not None
-        if landuse and min_color_mm > 0:
-            # Colour detail is set in print mm, independently of the terrain's:
-            # one DEM cell is a fraction of a mm, far under what a multi-material
-            # printer resolves, so anything finer than `min_color_mm` is
-            # dissolved before the mesh is cut.
-            cell_mm = min(
-                float(proj.x_of(grid.lons[1]) - proj.x_of(grid.lons[0])),
-                float(proj.y_of(grid.lats[1]) - proj.y_of(grid.lats[0])),
-            )
-            if cell_mm > 0:
-                cat_grid = generalize(cat_grid, min_color_mm / cell_mm)
-                smooth_colors = True
-        # Generalised colours get the contour cut too: dissolving fine features
-        # is only half the job, the borders still have to leave the grid (cells
-        # cut along a marching-squares polyline, then straightened) or the
-        # colours read as a mosaic of squares. Painting as-is (the slider at 0)
-        # keeps the raw cell edges, detail and all.
-        bodies: list[Body] = terrain_solid(
-            proj, cat_grid, naturalize=smooth_colors, clip=clip_mm
-        )
+        bodies, landuse = _terrain_bodies(proj, min_color_mm, clip_mm)
         # Requested *and* fine enough to show; below, the credit names what
         # was actually used rather than what was asked for.
         structures = include_buildings and _structures_can_show(proj)
         if structures:
-            # Bridges/elevated structures share the buildings toggle and colour
-            # layer; both take the same fork on scale (massing.keeps_its_shape)
-            # and differ only in placement: buildings are snapped onto the
-            # terrain surface, bridges keep their real deck elevation and are
-            # tied down to it.
-            # 大通りで街区を割る. Below ~1:40,000 no real road is a nozzle wide,
-            # so the arterials are cut in deliberately rather than waited for
-            # (roads.py). Nothing to decide: where there is road data and a
-            # minimum feature width, the 幹線街路 are the first thing that width
-            # is spent on. `road_cut` returns None where PLATEAU has no tran.
-            roads = (
-                PlateauRoadProvider().road_cut(
-                    proj, min_feature_mm,
-                    outline=clip_mm if clip_mm is not None else _grid_box(proj, grid),
-                )
-                if min_feature_mm > 0 else None
+            bodies += _structure_bodies(
+                proj, building_scale, min_feature_mm, clip_mm, structure_clip
             )
-            building_body = PlateauBuildingProvider().building_body(
-                proj, building_scale, min_feature_mm,
-                clip=_building_clip(structure_clip, roads, proj, grid),
-            )
-            if building_body is not None:
-                bodies.append(building_body)
-            bridge_body = PlateauBridgeProvider().bridge_body(
-                proj, min_feature_mm, clip=structure_clip
-            )
-            if bridge_body is not None:
-                bodies.append(bridge_body)
         if include_track:
-            # Clip to the terrain actually built (a custom outline may cut the
-            # track) so the ridge never overhangs the base; each in-area piece
-            # becomes its own sweep. Keep the ridge at least one nozzle wide
-            # so it does not split.
-            grid_extent = (
-                float(grid.lons.min()), float(grid.lats.min()),
-                float(grid.lons.max()), float(grid.lats.max()),
+            bodies += _track_bodies(
+                track, region, proj, clip_ll,
+                track_width_mm, track_height_mm, min_feature_mm,
             )
-            if region.is_plain:
-                segments = clip_track(track, grid_extent)
-            else:
-                # Outline ∩ fetched grid: the outline can poke a sub-pixel past
-                # the DEM crop at the corners that touch the fetch bbox.
-                segments = clip_track_to_polygon(
-                    track, clip_ll.intersection(box(*grid_extent))
-                )
-            ridges = []
-            for seg in segments:
-                try:
-                    ridges.append(track_ridge(
-                        seg, proj, max(track_width_mm, min_feature_mm), track_height_mm
-                    ))
-                except ValueError:
-                    pass  # sliver that only grazes the border: nothing to sweep
-            if ridges:
-                bodies.append(Body(trimesh.util.concatenate(ridges), "track"))
 
         # Rotate the scene back so the outline prints axis-aligned at origin.
         region.to_print_frame(bodies, proj)
 
-        # In the print frame the model's front edge lies on y=0; the plate and
-        # the credit stamp span it (a hexagon's flat bottom edge is its middle
-        # half).
-        if region.is_plain:
-            px0, px1 = 0.0, float(proj.x_of(grid.lons.max()))
-        else:
-            hw, _ = region.half_extents_m
-            w = 2.0 * hw * proj.scale
-            px0, px1 = (0.25 * w, 0.75 * w) if region.shape == "hex" else (0.0, w)
-
         # 出典刻印 (always on — the data licenses require attribution): the
         # formal 出典 sentence debossed on the underside travels with the
         # print itself; the same sentence rides in the file metadata.
+        px0, px1 = _front_edge(region, proj)
         engrave_credit(
             bodies, landuse, structures, px0, px1, base_thickness_mm,
         )

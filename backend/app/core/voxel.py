@@ -37,11 +37,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-import shapely
 import trimesh
 from PIL import Image, ImageDraw
 from scipy import ndimage
 from skimage import measure
+
+from .massing import geoms
 
 # The lattice is sized by the print, so this caps memory rather than ambition:
 # the distance transforms below allocate float64 over the whole grid, several
@@ -219,7 +220,7 @@ def clip_to(lat: Lattice, outline) -> Lattice:
     nx, ny = lat.occ.shape[:2]
     img = Image.new("1", (nx, ny), 0)
     draw = ImageDraw.Draw(img)
-    for poly in getattr(outline, "geoms", [outline]):
+    for poly in geoms(outline):
         if poly.is_empty:
             continue
         rings = [(poly.exterior, 1)] + [(r, 0) for r in poly.interiors]

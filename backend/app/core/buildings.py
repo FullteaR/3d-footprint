@@ -51,27 +51,21 @@ from __future__ import annotations
 
 import hashlib
 
-import mapbox_earcut as earcut
 import numpy as np
 import requests
 import shapely
 import trimesh
 from lxml import etree
-from shapely.geometry import box
 
-from ..config import DATA_DIR
-from . import safexml
+from . import citygml, plateau
 from .export import Body
-from .net import atomic_savez, session
-from .parallel import process_map
-from .plateau import fetch_datacatalog_cities
+from .net import atomic_savez
 from .massing import (
     blocks_of, footprint_of, keeps_its_shape, outline_parts, polygon_parts, prism,
 )
 from .voxel import solid_from
-from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
-MESH3_DLAT = 1.0 / 120.0  # 3rd-level mesh latitude span (30 arc-sec)
-MESH3_DLON = 1.0 / 80.0   # 3rd-level mesh longitude span (45 arc-sec)
+from .mesh import Projection
+
 EMBED_MM = 0.5            # how far building block bases sink into the terrain
 MIN_H_MM = 0.6           # minimum block height so even short buildings read
 # Touching footprints merge into one block only within a height class, so a
@@ -81,9 +75,8 @@ MIN_H_MM = 0.6           # minimum block height so even short buildings read
 HEIGHT_CLASSES_M = (12.0, 31.0, 60.0, 120.0)
 
 _BLDG_NS = "http://www.opengis.net/citygml/building/2.0"
-_GML_NS = "http://www.opengis.net/gml"
 _BUILDING_TAG = f"{{{_BLDG_NS}}}Building"
-_NS = {"bldg": _BLDG_NS, "gml": _GML_NS}
+_NS = {"bldg": _BLDG_NS}   # only the LOD1 lookup below needs a prefix
 # Semantic surface -> label. Ground surfaces are kept (they cap the bottom so
 # each building stays a closed solid) but labelled "wall" since they sit hidden
 # below the terrain surface.
@@ -91,68 +84,6 @@ _SURFACE_LABEL = {"RoofSurface": "roof", "WallSurface": "wall",
                   "GroundSurface": "wall", "ClosureSurface": "wall",
                   "OuterCeilingSurface": "roof", "OuterFloorSurface": "wall"}
 _LABELS = ("wall", "roof")  # ftype 0 = wall, 1 = roof
-
-
-def _mesh3_codes(bbox: tuple[float, float, float, float]) -> list[str]:
-    """3rd-level (8-digit) JIS mesh codes covering a bbox."""
-    min_lon, min_lat, max_lon, max_lat = bbox
-
-    def code(lat: float, lon: float) -> str:
-        p, u = int(lat * 1.5), int(lon) - 100
-        lat1, lon1 = p / 1.5, u + 100
-        q = int((lat - lat1) / (1.0 / 12.0))            # 2nd mesh row (0..7)
-        v = int((lon - lon1) / (1.0 / 8.0))             # 2nd mesh col (0..7)
-        r = int((lat - lat1 - q / 12.0) / MESH3_DLAT)   # 3rd mesh row (0..9)
-        w = int((lon - lon1 - v / 8.0) / MESH3_DLON)    # 3rd mesh col (0..9)
-        return f"{p:02d}{u:02d}{q}{v}{r}{w}"
-
-    codes = set()
-    lat = min_lat
-    while lat <= max_lat + MESH3_DLAT:
-        lon = min_lon
-        while lon <= max_lon + MESH3_DLON:
-            codes.add(code(lat, lon))
-            lon += MESH3_DLON
-        lat += MESH3_DLAT
-    return sorted(codes)
-
-
-def _poslist(ring: etree._Element) -> np.ndarray:
-    """LinearRing -> (n,3) lon,lat,height (dropping the repeated closing point)."""
-    vals = ring.findtext("gml:posList", namespaces=_NS)
-    if not vals:
-        return np.empty((0, 3))
-    a = np.array(vals.split(), dtype=float).reshape(-1, 3)
-    if len(a) > 1 and np.allclose(a[0], a[-1]):
-        a = a[:-1]
-    return a[:, [1, 0, 2]]  # posList is lat lon h -> store lon lat h
-
-
-def _triangulate(ext: np.ndarray, holes: list[np.ndarray], lat_mid: float):
-    """Triangulate a planar 3D polygon; return (points (k,3), faces (t,3))."""
-    rings = [ext] + holes
-    pts = np.vstack(rings)
-    if len(pts) < 3:
-        return None
-    # Project to a local metric plane, drop the axis most aligned with the
-    # polygon normal, and earcut the remaining two coordinates.
-    klon = _M_PER_DEG_LON * np.cos(np.radians(lat_mid))
-    metric = pts * np.array([klon, _M_PER_DEG_LAT, 1.0])
-    x, y, z = metric[: len(ext)].T
-    nx_ = np.sum((y - np.roll(y, -1)) * (z + np.roll(z, -1)))
-    ny_ = np.sum((z - np.roll(z, -1)) * (x + np.roll(x, -1)))
-    nz_ = np.sum((x - np.roll(x, -1)) * (y + np.roll(y, -1)))
-    drop = int(np.argmax(np.abs([nx_, ny_, nz_])))
-    keep = [i for i in range(3) if i != drop]
-    verts2d = np.ascontiguousarray(metric[:, keep], dtype=np.float64)
-    ring_ends = np.cumsum([len(r) for r in rings]).astype(np.uint32)
-    try:
-        idx = earcut.triangulate_float64(verts2d, ring_ends)
-    except Exception:
-        return None
-    if len(idx) < 3:
-        return None
-    return pts, np.asarray(idx, dtype=np.int64).reshape(-1, 3)
 
 
 def _building_polygons(building: etree._Element):
@@ -166,16 +97,16 @@ def _building_polygons(building: etree._Element):
 
     if surfaces:  # LOD2 semantic surfaces
         for label, surf in surfaces:
-            for poly in surf.iter(f"{{{_GML_NS}}}Polygon"):
-                yield (label, *_rings(poly))
+            for poly in surf.iter(citygml.POLYGON_TAG):
+                yield (label, *citygml.rings(poly))
         return
 
     solid = building.find(".//bldg:lod1Solid", _NS)  # LOD1 fallback (flat prism)
     if solid is None:
         return
     polys = []
-    for poly in solid.iter(f"{{{_GML_NS}}}Polygon"):
-        ext, holes = _rings(poly)
+    for poly in solid.iter(citygml.POLYGON_TAG):
+        ext, holes = citygml.rings(poly)
         if len(ext):
             polys.append((ext, holes))
     if not polys:
@@ -188,53 +119,42 @@ def _building_polygons(building: etree._Element):
         yield label, ext, holes
 
 
-def _rings(poly: etree._Element) -> tuple[np.ndarray, list[np.ndarray]]:
-    ext_el = poly.find("gml:exterior/gml:LinearRing", _NS)
-    ext = _poslist(ext_el) if ext_el is not None else np.empty((0, 3))
-    holes = [_poslist(r) for r in poly.findall("gml:interior/gml:LinearRing", _NS)]
-    return ext, [h for h in holes if len(h) >= 3]
-
-
-def _geometry_cache_path(mesh: str, url: str):
-    key = hashlib.sha1(url.encode()).hexdigest()[:16]
-    return DATA_DIR / "buildings" / f"{mesh}_{key}.npz"
+def _cache_path(mesh: str, url: str):
+    return plateau.cache_file("buildings", mesh, url)
 
 
 def _geometry(mesh: str, url: str):
     """Cached geographic geometry for one bldg GML.
 
     Returns (verts (N,3) lon/lat/h, faces (M,3), ftype (M,), vbid (N,)).
-    Module-level so `process_map` can ship it to parse workers by reference.
+    Module-level so `plateau.distinct_files` can hand it to a parse worker
+    by reference.
     """
-    cache = _geometry_cache_path(mesh, url)
+    cache = _cache_path(mesh, url)
     if cache.is_file():
         d = np.load(cache)
         return d["verts"], d["faces"], d["ftype"], d["vbid"]
 
-    lat_mid = (int(mesh[:2]) / 1.5) + 0.5  # rough, just for the metric basis
+    lat_mid = citygml.mesh_lat_mid(mesh)
     all_v, all_f, all_t, all_b = [], [], [], []
     voff = bid = 0
     try:
-        with session().get(url, stream=True, timeout=600) as resp:
-            resp.raise_for_status()
-            resp.raw.decode_content = True
-            for _, b in safexml.iterparse(resp.raw, _BUILDING_TAG):
-                started = voff
-                for label, ext, holes in _building_polygons(b):
-                    if len(ext) < 3:
-                        continue
-                    tri = _triangulate(ext, holes, lat_mid)
-                    if tri is None:
-                        continue
-                    pts, faces = tri
-                    all_v.append(pts)
-                    all_f.append(faces + voff)
-                    all_t.append(np.full(len(faces), _LABELS.index(label), np.uint8))
-                    voff += len(pts)
-                if voff > started:
-                    all_b.append(np.full(voff - started, bid, np.int32))
-                    bid += 1
-                b.clear()
+        for b in citygml.stream_features(url, _BUILDING_TAG):
+            started = voff
+            for label, ext, holes in _building_polygons(b):
+                if len(ext) < 3:
+                    continue
+                tri = citygml.triangulate(ext, holes, lat_mid)
+                if tri is None:
+                    continue
+                pts, faces = tri
+                all_v.append(pts)
+                all_f.append(faces + voff)
+                all_t.append(np.full(len(faces), _LABELS.index(label), np.uint8))
+                voff += len(pts)
+            if voff > started:
+                all_b.append(np.full(voff - started, bid, np.int32))
+                bid += 1
     except (requests.RequestException, OSError, ValueError):
         return None
 
@@ -252,29 +172,21 @@ def _geometry(mesh: str, url: str):
     return verts, faces, ftype, vbid
 
 
-def _warm_geometry(mesh: str, url: str) -> bool:
-    """Parse-worker job: ensure one GML's npz cache exists (True on success)."""
-    return _geometry(mesh, url) is not None
+def _content_key(geo) -> bytes | None:
+    """What makes one file's buildings distinct, or None when it has none.
+
+    A border mesh's files are either city-partitioned (each city only its own
+    buildings) or the identical mesh-wide content duplicated per city (2025
+    pref datasets): keep every distinct file, render identical content once.
+    """
+    verts, faces = geo[0], geo[1]
+    if len(verts) == 0:
+        return None
+    return hashlib.sha1(verts.tobytes() + faces.tobytes()).digest()
 
 
 class PlateauBuildingProvider:
     """PLATEAU LOD2/LOD1 building provider. Covers PLATEAU cities only."""
-
-    def _bldg_urls(self, codes: list[str]) -> dict[str, list[str]]:
-        """Map covered 8-digit mesh -> every bldg GML URL (one per municipality).
-
-        A mesh straddling a city border appears in each city's dataset and each
-        file holds only that city's buildings, so all of them are needed —
-        keeping just the first would drop the other side of the border.
-        """
-        wanted = set(codes)
-        out: dict[str, list[str]] = {}
-        for city in fetch_datacatalog_cities(codes):
-            for entry in city.get("files", {}).get("bldg", []) or []:
-                mesh, url = str(entry.get("code")), entry.get("url")
-                if mesh in wanted and url and url not in out.setdefault(mesh, []):
-                    out[mesh].append(url)
-        return {m: u for m, u in out.items() if u}
 
     def building_body(
         self,
@@ -296,43 +208,21 @@ class PlateauBuildingProvider:
         model is a rotated rect / hexagon.
         """
         grid = proj.grid
-        bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
-        urls = self._bldg_urls(_mesh3_codes(bbox))
+        urls = plateau.file_urls("bldg", plateau.mesh3_codes(grid.bbox))
         if not urls:
             return None
 
-        # First use of an area: download + parse every uncached GML on the
-        # process pool (per-file independent, CPU-heavy). Failed files stay
-        # uncached and are skipped below — same as the sequential behaviour,
-        # minus a second download attempt.
-        pairs = [(m, u) for m, us in urls.items() for u in us]
-        fresh = [p for p in pairs if not _geometry_cache_path(*p).is_file()]
-        failed = {p for p, ok in zip(fresh, process_map(_warm_geometry, fresh)) if not ok}
-
         verts, faces, vbid = [], [], []
         voff = boff = 0
-        seen: set[bytes] = set()
-        for mesh, mesh_urls in urls.items():
-            for url in mesh_urls:
-                if (mesh, url) in failed:
-                    continue
-                geo = _geometry(mesh, url)
-                if geo is None or len(geo[0]) == 0:
-                    continue
-                v, f, _t, b = geo  # roof/wall type unused: buildings are one colour
-                # A border mesh's files are either city-partitioned (each city
-                # only its own buildings) or the identical mesh-wide content
-                # duplicated per city (2025 pref datasets): keep every distinct
-                # file, render identical content once.
-                digest = hashlib.sha1(v.tobytes() + f.tobytes()).digest()
-                if digest in seen:
-                    continue
-                seen.add(digest)
-                verts.append(v)
-                faces.append(f + voff)
-                vbid.append(b + boff)
-                voff += len(v)
-                boff += int(b.max()) + 1 if len(b) else 0
+        # roof/wall type unused: buildings are one colour.
+        for v, f, _t, b in plateau.distinct_files(
+            urls, cache_path=_cache_path, load=_geometry, key=_content_key
+        ):
+            verts.append(v)
+            faces.append(f + voff)
+            vbid.append(b + boff)
+            voff += len(v)
+            boff += int(b.max()) + 1 if len(b) else 0
         if not verts:
             return None
 
@@ -356,10 +246,7 @@ class PlateauBuildingProvider:
         # The print outline, in the same mm frame as the footprints: the model's
         # own (rotated rect / hexagon) or, by default, the fetched grid rectangle.
         if clip is None:
-            clip = box(
-                float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
-                float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
-            )
+            clip = proj.grid_box()
         shapely.prepare(clip)
 
         # Keep every building that reaches into the print footprint at all: one

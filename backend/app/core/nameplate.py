@@ -46,7 +46,7 @@ from shapely.ops import polygonize
 
 from . import safexml
 from .export import Body
-from .massing import _ring_xy
+from .massing import geoms, ring_xy
 
 # Plate area limits (mm): keep the artwork printable.
 _SIDE_MIN, _SIDE_MAX = 4.0, 200.0
@@ -297,7 +297,7 @@ def to_plate_frame(
 
 def _polygons(geom: shapely.Geometry) -> shapely.Geometry | None:
     """The polygonal part of a clip result (which can also yield lines)."""
-    parts = [p for p in getattr(geom, "geoms", [geom])
+    parts = [p for p in geoms(geom)
              if isinstance(p, shapely.Polygon) and not p.is_empty]
     return shapely.union_all(parts) if parts else None
 
@@ -353,11 +353,11 @@ def _fit_to_plate(
 def _tri_2d(geom: shapely.Geometry) -> list[tuple[np.ndarray, np.ndarray]]:
     """Triangulate a polygonal region: [(points_2d, ccw_faces), ...]."""
     out = []
-    for p in getattr(geom, "geoms", [geom]):
+    for p in geoms(geom):
         if not isinstance(p, shapely.Polygon) or p.is_empty:
             continue
         poly = orient(p, 1.0)
-        rings = [_ring_xy(poly.exterior)] + [_ring_xy(r) for r in poly.interiors]
+        rings = [ring_xy(poly.exterior)] + [ring_xy(r) for r in poly.interiors]
         rings = [r for r in rings if len(r) >= 3]
         if not rings:
             continue
@@ -488,12 +488,12 @@ class _Shell:
         quads below always face away from it — outward on a shell, into the
         void on a hole.
         """
-        for p in getattr(geom, "geoms", [geom]):
+        for p in geoms(geom):
             if not isinstance(p, shapely.Polygon) or p.is_empty:
                 continue
             p = orient(p, 1.0)
             for ring in (p.exterior, *p.interiors):
-                c = _ring_xy(ring)
+                c = ring_xy(ring)
                 m = len(c)
                 if m < 3:
                     continue

@@ -17,7 +17,6 @@ from __future__ import annotations
 import io
 import math
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -42,6 +41,18 @@ class ElevationGrid:
     elev: np.ndarray  # (ny, nx) float meters, NaN = no data
     lons: np.ndarray  # (nx,) longitude of each column (ascending)
     lats: np.ndarray  # (ny,) latitude of each row (ascending = south->north)
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """(min_lon, min_lat, max_lon, max_lat) of the grid as fetched.
+
+        Not the requested bbox: the crop lands on DEM pixel edges, so this can
+        be a hair wider. It is the extent everything else is asked for — the
+        PLATEAU meshes to fetch, the rectangle a model without its own outline
+        is cut to.
+        """
+        return (float(self.lons[0]), float(self.lats[0]),
+                float(self.lons[-1]), float(self.lats[-1]))
 
 
 def _lonlat_to_tile(lon: float, lat: float, z: int) -> tuple[float, float]:

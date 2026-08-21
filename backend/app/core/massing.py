@@ -82,6 +82,16 @@ def footprint_of(xy: np.ndarray, faces: np.ndarray):
     return fp if not fp.is_empty else None
 
 
+def geoms(geom):
+    """The parts of a geometry that may or may not be a collection.
+
+    shapely's single and multi types share no iteration protocol, so anything
+    handling both ends up asking for `.geoms` and falling back to the geometry
+    itself. Asked in one place instead.
+    """
+    return getattr(geom, "geoms", [geom])
+
+
 def polygon_parts(geom) -> list:
     """The polygonal parts of any geometry (a clip can also yield lines/points)."""
     if isinstance(geom, Polygon):
@@ -167,7 +177,7 @@ def printable(geom, min_feature: float, clip: Polygon | None = None):
         return None
     h = 0.5 * min_feature
     out = []
-    for poly in getattr(geom, "geoms", [geom]):
+    for poly in geoms(geom):
         poly = _shaped(poly, h)
         if poly.is_empty or poly.area < min_feature * min_feature:
             continue                                  # sub-feature noise
@@ -185,7 +195,7 @@ def printable(geom, min_feature: float, clip: Polygon | None = None):
     return out[0] if len(out) == 1 else MultiPolygon(out)
 
 
-def _ring_xy(ring) -> np.ndarray:
+def ring_xy(ring) -> np.ndarray:
     """LinearRing -> (k,2) vertices with the repeated closing point dropped."""
     return np.asarray(ring.coords, dtype=np.float64)[:-1, :2]
 
@@ -193,7 +203,7 @@ def _ring_xy(ring) -> np.ndarray:
 def _extrude_polygon(poly: Polygon, z_bottom: float, z_top: float):
     """One simple Polygon (with optional holes) -> watertight prism mm mesh."""
     poly = orient(poly, 1.0)                           # exterior CCW, holes CW
-    rings = [_ring_xy(poly.exterior)] + [_ring_xy(r) for r in poly.interiors]
+    rings = [ring_xy(poly.exterior)] + [ring_xy(r) for r in poly.interiors]
     rings = [r for r in rings if len(r) >= 3]
     if not rings:
         return None
@@ -233,7 +243,7 @@ def prism(geom, z_bottom: float, z_top: float):
     if geom is None or geom.is_empty or z_top - z_bottom <= 1e-6:
         return None
     parts = []
-    for p in getattr(geom, "geoms", [geom]):
+    for p in geoms(geom):
         m = _extrude_polygon(p, z_bottom, z_top)
         if m is not None:
             parts.append(m)

@@ -300,12 +300,12 @@ def test_no_minimum_width_means_no_massing_and_no_road_data(client, gpx, offline
                 min_feature_mm="0").status_code == 200
 
 
-def test_without_a_nameplate_the_structure_outline_is_left_alone(flat_grid, flat_proj):
+def test_without_a_nameplate_the_structure_outline_is_left_alone(flat_proj):
     """No plate, no hole — a plain rect keeps handing the providers None so
     they fall back to the fetched grid rectangle themselves."""
-    assert routes._structure_clip(None, None, flat_proj, flat_grid) is None
+    assert routes._structure_clip(None, None, flat_proj) is None
     outline = box(0.0, 0.0, 10.0, 10.0)
-    assert routes._structure_clip(outline, None, flat_proj, flat_grid) is outline
+    assert routes._structure_clip(outline, None, flat_proj) is outline
 
 
 # ---- the nameplate, continued ----------------------------------------------

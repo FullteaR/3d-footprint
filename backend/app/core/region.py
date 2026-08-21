@@ -20,6 +20,7 @@ import numpy as np
 from shapely.geometry import LineString, Polygon
 
 from .gpx import Track
+from .massing import geoms
 from .mesh import _M_PER_DEG_LAT, _M_PER_DEG_LON, Projection
 
 SHAPES = ("rect", "square", "hex")
@@ -187,7 +188,7 @@ def clip_track_to_polygon(track: Track, poly) -> list[Track]:
         return []
     inter = LineString(zip(track.lons, track.lats)).intersection(poly)
     out: list[Track] = []
-    for g in getattr(inter, "geoms", [inter]):
+    for g in geoms(inter):
         if isinstance(g, LineString) and len(g.coords) >= 2:
             lons, lats = zip(*((p[0], p[1]) for p in g.coords))
             out.append(Track(lats=list(lats), lons=list(lons)))

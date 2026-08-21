@@ -29,9 +29,10 @@ connected span is reduced to its footprint and rebuilt as a thick deck slab at
 the real deck elevation plus stout pillars to the terrain (massing.py). Short
 spans become a single solid block to the ground.
 
-Geometry parsing/triangulation is shared with the building pipeline; only the
-feature namespace and the placement differ. Triangulated polygons are cached per
-mesh as a compact npz in geographic coordinates so the heavy parse runs once.
+Reading and triangulating a CityGML file is `citygml.py`'s job, the same as for
+buildings; only the feature namespace and the placement differ here. Triangulated
+polygons are cached per mesh as a compact npz in geographic coordinates so the
+heavy parse runs once.
 """
 from __future__ import annotations
 
@@ -44,14 +45,10 @@ import trimesh
 from lxml import etree
 from shapely.geometry import box
 
-from ..config import DATA_DIR
-from . import safexml
-from .buildings import _mesh3_codes, _rings, _triangulate
+from . import citygml, plateau
 from .export import Body
-from .net import atomic_savez, session
-from .parallel import process_map
-from .plateau import fetch_datacatalog_cities
-from .massing import footprint_of, keeps_its_shape, printable, prism
+from .net import atomic_savez
+from .massing import footprint_of, geoms, keeps_its_shape, printable, prism
 from .voxel import solid_from
 from .mesh import Projection
 
@@ -60,9 +57,7 @@ DECK_THICKNESS_MM = 1.2  # printable deck-slab thickness (raised to min_feature)
 PILLAR_SPACING_MM = 8.0  # target gap between support pillars along a long span
 
 _BRID_NS = "http://www.opengis.net/citygml/bridge/2.0"
-_GML_NS = "http://www.opengis.net/gml"
 _BRIDGE_TAG = f"{{{_BRID_NS}}}Bridge"
-_POLYGON_TAG = f"{{{_GML_NS}}}Polygon"
 # LOD1 geometry containers (a coarse prism). Used only when a feature carries no
 # finer LOD2/LOD3 surfaces, so we never render a bridge twice.
 _LOD1_TAGS = (
@@ -74,8 +69,8 @@ _LOD1_TAGS = (
 
 def _has_inline_ring(poly: etree._Element) -> bool:
     """True if a gml:Polygon has its own exterior ring (not an xlink reference)."""
-    return poly.find(f"gml:exterior/gml:LinearRing/gml:posList",
-                     {"gml": _GML_NS}) is not None
+    return poly.find("gml:exterior/gml:LinearRing/gml:posList",
+                     {"gml": citygml.GML_NS}) is not None
 
 
 def _bridge_polygons(bridge: etree._Element):
@@ -87,55 +82,51 @@ def _bridge_polygons(bridge: etree._Element):
     lod1Solid and finer surfaces, the lod1 polygons are dropped so it is not
     rendered twice.
     """
-    inline = [p for p in bridge.iter(_POLYGON_TAG) if _has_inline_ring(p)]
+    inline = [p for p in bridge.iter(citygml.POLYGON_TAG) if _has_inline_ring(p)]
     if not inline:
         return
     lod1_ids = {
         id(p)
         for tag in _LOD1_TAGS
         for container in bridge.iter(tag)
-        for p in container.iter(_POLYGON_TAG)
+        for p in container.iter(citygml.POLYGON_TAG)
     }
     finer = [p for p in inline if id(p) not in lod1_ids]
     for poly in (finer or inline):
-        yield _rings(poly)
+        yield citygml.rings(poly)
 
 
-def _geometry_cache_path(mesh: str, url: str):
-    key = hashlib.sha1(url.encode()).hexdigest()[:16]
-    return DATA_DIR / "bridges" / f"{mesh}_{key}.npz"
+def _cache_path(mesh: str, url: str):
+    return plateau.cache_file("bridges", mesh, url)
 
 
 def _geometry(mesh: str, url: str):
     """Cached geographic geometry for one brid GML.
 
     Returns (verts (N,3) lon/lat/h, faces (M,3)) or None on failure.
-    Module-level so `process_map` can ship it to parse workers by reference.
+    Module-level so `plateau.distinct_files` can hand it to a parse worker
+    by reference.
     """
-    cache = _geometry_cache_path(mesh, url)
+    cache = _cache_path(mesh, url)
     if cache.is_file():
         d = np.load(cache)
         return d["verts"], d["faces"]
 
-    lat_mid = (int(mesh[:2]) / 1.5) + 0.5  # rough, just for the metric basis
+    lat_mid = citygml.mesh_lat_mid(mesh)
     all_v, all_f = [], []
     voff = 0
     try:
-        with session().get(url, stream=True, timeout=600) as resp:
-            resp.raise_for_status()
-            resp.raw.decode_content = True
-            for _, b in safexml.iterparse(resp.raw, _BRIDGE_TAG):
-                for ext, holes in _bridge_polygons(b):
-                    if len(ext) < 3:
-                        continue
-                    tri = _triangulate(ext, holes, lat_mid)
-                    if tri is None:
-                        continue
-                    pts, faces = tri
-                    all_v.append(pts)
-                    all_f.append(faces + voff)
-                    voff += len(pts)
-                b.clear()
+        for b in citygml.stream_features(url, _BRIDGE_TAG):
+            for ext, holes in _bridge_polygons(b):
+                if len(ext) < 3:
+                    continue
+                tri = citygml.triangulate(ext, holes, lat_mid)
+                if tri is None:
+                    continue
+                pts, faces = tri
+                all_v.append(pts)
+                all_f.append(faces + voff)
+                voff += len(pts)
     except (requests.RequestException, OSError, ValueError):
         return None
 
@@ -149,26 +140,20 @@ def _geometry(mesh: str, url: str):
     return verts, faces
 
 
-def _warm_geometry(mesh: str, url: str) -> bool:
-    """Parse-worker job: ensure one GML's npz cache exists (True on success)."""
-    return _geometry(mesh, url) is not None
+def _content_key(geo) -> bytes | None:
+    """What makes one file's bridges distinct, or None when it has none.
+
+    Same-mesh files from different cities may be byte-identical duplicates
+    (2025 pref sets): render each content once.
+    """
+    verts, faces = geo
+    if len(verts) == 0:
+        return None
+    return hashlib.sha1(verts.tobytes() + faces.tobytes()).digest()
 
 
 class PlateauBridgeProvider:
     """PLATEAU brid (bridge) provider. Covers PLATEAU cities only."""
-
-    def _brid_urls(self, codes: list[str]) -> dict[str, list[str]]:
-        """Map covered 8-digit mesh -> every brid GML URL (one per municipality)."""
-        wanted = set(codes)
-        out: dict[str, list[str]] = {}
-        for city in fetch_datacatalog_cities(codes):
-            for entry in city.get("files", {}).get("brid", []) or []:
-                mesh, url = str(entry.get("code")), entry.get("url")
-                # Dedupe: a city spanning several query chunks is returned once
-                # per chunk, which would parse and render its bridges twice.
-                if mesh in wanted and url and url not in out.setdefault(mesh, []):
-                    out[mesh].append(url)
-        return {m: u for m, u in out.items() if u}
 
     def bridge_body(
         self,
@@ -184,38 +169,18 @@ class PlateauBridgeProvider:
         the minimum printable width. `clip` (print mm) replaces the grid rectangle
         as the print outline when the model is a rotated rect / hexagon.
         """
-        grid = proj.grid
-        bbox = (grid.lons.min(), grid.lats.min(), grid.lons.max(), grid.lats.max())
-        urls = self._brid_urls(_mesh3_codes(bbox))
+        urls = plateau.file_urls("brid", plateau.mesh3_codes(proj.grid.bbox))
         if not urls:
             return None
 
-        # Parse every uncached GML on the process pool (see buildings.py);
-        # failed files are skipped below, exactly as before.
-        pairs = [(m, u) for m, us in urls.items() for u in us]
-        fresh = [p for p in pairs if not _geometry_cache_path(*p).is_file()]
-        failed = {p for p, ok in zip(fresh, process_map(_warm_geometry, fresh)) if not ok}
-
         verts, faces = [], []
         voff = 0
-        seen: set[bytes] = set()
-        for mesh, mesh_urls in urls.items():
-            for url in mesh_urls:
-                if (mesh, url) in failed:
-                    continue
-                geo = _geometry(mesh, url)
-                if geo is None or len(geo[0]) == 0:
-                    continue
-                v, f = geo
-                # Same-mesh files from different cities may be byte-identical
-                # duplicates (2025 pref sets): render each content once.
-                digest = hashlib.sha1(v.tobytes() + f.tobytes()).digest()
-                if digest in seen:
-                    continue
-                seen.add(digest)
-                verts.append(v)
-                faces.append(f + voff)
-                voff += len(v)
+        for v, f in plateau.distinct_files(
+            urls, cache_path=_cache_path, load=_geometry, key=_content_key
+        ):
+            verts.append(v)
+            faces.append(f + voff)
+            voff += len(v)
         if not verts:
             return None
 
@@ -228,10 +193,7 @@ class PlateauBridgeProvider:
         # The print outline, in the same mm frame as the footprints: the model's
         # own (rotated rect / hexagon) or, by default, the fetched grid rectangle.
         if clip is None:
-            clip = box(
-                float(proj.x_of(grid.lons.min())), float(proj.y_of(grid.lats.min())),
-                float(proj.x_of(grid.lons.max())), float(proj.y_of(grid.lats.max())),
-            )
+            clip = proj.grid_box()
         shapely.prepare(clip)
 
         # Clip to the print footprint by face centroid, so a bridge crossing the
@@ -262,11 +224,11 @@ class PlateauBridgeProvider:
         if fp_all is None:
             return None
         pieces: list[trimesh.Trimesh] = []
-        for span in getattr(fp_all, "geoms", [fp_all]):
+        for span in geoms(fp_all):
             sp = printable(span, min_feature_mm, clip)
             if sp is None:
                 continue
-            for poly in getattr(sp, "geoms", [sp]):
+            for poly in geoms(sp):
                 pieces.extend(_span_pieces(poly, xy, z_real, proj, min_feature_mm))
         if not pieces:
             return None
