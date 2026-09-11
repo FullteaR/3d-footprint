@@ -1,3 +1,5 @@
+import { apiFetch, formKey, waitForJob, type Job } from "./generation";
+import { jobStageOf, warningOf } from "./i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MapPicker, clampPlate, extentMeters, fitBbox, freeSpot, normalizeBbox,
@@ -16,7 +18,7 @@ type Lock = "span" | "size" | "scale";
 
 // What the action bar is saying right now.
 type Status =
-  | { kind: "needFile" | "generating" | "downloading" | "downloaded" }
+  | { kind: "needFile" | "generating" | "downloading" | "downloaded" | "cancelled" }
   | { kind: "error"; detail: string }
   | null;
 // Mirrors MAX_GPX_BYTES / MAX_SVG_BYTES in backend/app/config.py.
@@ -25,7 +27,7 @@ const MAX_SVG_MB = 5;
 
 const STATUS_TEXT = {
   needFile: "stNeedFile", generating: "stGenerating",
-  downloading: "stDownloading", downloaded: "stDownloaded",
+  downloading: "stDownloading", downloaded: "stDownloaded", cancelled: "stCancelled",
 } as const;
 
 // Number input that commits on blur / Enter — committed values can move the
@@ -202,9 +204,15 @@ export function App() {
   const [buildingColor, setBuildingColor] = useState("#b0b0b0");
   const [fmt, setFmt] = useState("3mf");
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   // Kept as a key rather than a rendered sentence, so a language switch
   // re-reads the message too (backend error text passes through as-is).
   const [status, setStatus] = useState<Status>(null);
+  const [job, setJob] = useState<Job | null>(null);
+  const [generatedKey, setGeneratedKey] = useState("");
+  const [expired, setExpired] = useState(false);
+  const activeRequest = useRef<AbortController | null>(null);
+  const activeJobId = useRef<string | null>(null);
   const [glb, setGlb] = useState<ArrayBuffer | null>(null);
   const [bbox, setBbox] = useState<Bbox | null>(null);
   const [shape, setShape] = useState<Shape>("rect");
@@ -491,52 +499,121 @@ export function App() {
     if (bboxRef.current) applyBbox(bboxRef.current);
   }, [applyBbox]);
 
-  // Both buttons post the same form to the same endpoint and differ only in
-  // the format they ask for and what they do with the answer; the busy flag,
-  // the status line and the backend's error detail are shared.
-  async function generate(
-    outFmt: string,
-    kind: "generating" | "downloading",
-    receive: (resp: Response) => Promise<void>,
-  ) {
-    if (!file) {
-      setStatus({ kind: "needFile" });
-      return;
+  const currentKey = useMemo(() => file ? formKey(buildForm("glb")) : "", [file, buildForm]);
+  const currentKeyRef = useRef(currentKey);
+  currentKeyRef.current = currentKey;
+  const previewCurrent = !!job && job.status === "succeeded" && generatedKey === currentKey && !expired;
+
+  useEffect(() => {
+    if (!job?.expires_at) return;
+    const timer = window.setTimeout(() => setExpired(true), Math.max(0, job.expires_at * 1000 - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [job?.expires_at]);
+
+  useEffect(() => () => {
+    activeRequest.current?.abort();
+    if (activeJobId.current) {
+      void fetch(`/api/jobs/${activeJobId.current}`, { method: "DELETE", keepalive: true }).catch(() => {});
     }
+  }, []);
+
+  async function createModel() {
+    if (!file || busy || cancelling || activeJobId.current) return;
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    const submittedKey = currentKey;
+    const id = crypto.randomUUID().replace(/-/g, "");
+    activeJobId.current = id;
     setBusy(true);
-    setStatus({ kind });
+    setExpired(false);
+    setStatus({ kind: "generating" });
     try {
-      const resp = await fetch("/api/generate", { method: "POST", body: buildForm(outFmt) });
-      if (!resp.ok) {
-        const body = (await resp.json().catch(() => ({}))) as { detail?: string };
-        throw new Error(body.detail ?? `HTTP ${resp.status}`);
+      if (job) await apiFetch(`/api/jobs/${job.id}`, { method: "DELETE" }).catch(() => {});
+      setJob(null);
+      setGlb(null);
+      const form = buildForm("glb");
+      // Retrying an interrupted submission uses the same id, so it cannot
+      // schedule the expensive work twice.
+      try {
+        await apiFetch("/api/generate", {
+          method: "POST", body: form, signal: controller.signal,
+          headers: { "Idempotency-Key": id },
+        });
+      } catch (error) {
+        controller.signal.throwIfAborted();
+        // An accepted request can lose its response. Look up its known id
+        // before treating the submission as failed.
+        try { await apiFetch(`/api/jobs/${id}`, { signal: controller.signal }); }
+        catch { throw error; }
       }
-      await receive(resp);
-    } catch (e) {
-      setStatus({ kind: "error", detail: (e as Error).message });
+      const completed = await waitForJob(id, setJob, controller.signal);
+      const preview = await apiFetch(`/api/jobs/${id}/files/glb`, { signal: controller.signal });
+      const bytes = await preview.arrayBuffer();
+      controller.signal.throwIfAborted();
+      setGlb(bytes);
+      setJob(completed);
+      setGeneratedKey(submittedKey);
+      setStatus(null);
+      activeJobId.current = null;
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setStatus({ kind: "error", detail: (error as Error).message });
+        // If polling failed, leave no abandoned computation running.
+        try { await apiFetch(`/api/jobs/${id}`, { method: "DELETE" }); activeJobId.current = null; }
+        catch { /* Keep the id so the cancel button can retry. Server TTL is the final bound. */ }
+      }
+    } finally {
+      if (activeRequest.current === controller) {
+        setBusy(false);
+        activeRequest.current = null;
+      }
+    }
+  }
+
+  async function cancelGeneration() {
+    const id = activeJobId.current;
+    if (!id || cancelling) return;
+    const controller = activeRequest.current;
+    setCancelling(true);
+    try {
+      await apiFetch(`/api/jobs/${id}`, { method: "DELETE" });
+      controller?.abort();
+      activeRequest.current = null;
+      activeJobId.current = null;
+      setJob(null);
+      setGlb(null);
+      setStatus({ kind: "cancelled" });
+      setBusy(false);
+    } catch (error) {
+      setStatus({ kind: "error", detail: (error as Error).message });
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  async function download() {
+    if (!previewCurrent || !job || busy || cancelling) return;
+    setBusy(true);
+    setStatus({ kind: "downloading" });
+    const downloadKey = generatedKey;
+    try {
+      const response = await apiFetch(`/api/jobs/${job.id}/files/${fmt}`);
+      const blob = await response.blob();
+      // A setting may change during transfer; do not save an outdated model.
+      if (currentKeyRef.current !== downloadKey) { setStatus(null); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `footprint.${fmt === "stl_multi" ? "zip" : fmt}`;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatus({ kind: "downloaded" });
+    } catch (error) {
+      setStatus({ kind: "error", detail: (error as Error).message });
     } finally {
       setBusy(false);
     }
   }
-
-  // Generation only runs on the button, not on every tweak.
-  const createModel = () =>
-    generate("glb", "generating", async (resp) => {
-      setGlb(await resp.arrayBuffer());
-      setStatus(null);
-    });
-
-  const download = () =>
-    generate(fmt, "downloading", async (resp) => {
-      const ext = fmt === "stl_multi" ? "zip" : fmt;
-      const url = URL.createObjectURL(await resp.blob());
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `footprint.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setStatus({ kind: "downloaded" });
-    });
 
   // Refuse an oversized file here rather than after uploading it. The server
   // enforces the same ceilings (MAX_GPX_BYTES / MAX_SVG_BYTES in
@@ -785,7 +862,7 @@ export function App() {
           </div>
 
           <div className="panel-actions">
-            <button className="btn btn-primary btn-block" onClick={createModel} disabled={busy || !file}>
+            <button className="btn btn-primary btn-block" onClick={createModel} disabled={busy || cancelling || !file || !!activeJobId.current}>
               {busy && <span className="spinner" />}
               {t.create}
             </button>
@@ -798,9 +875,18 @@ export function App() {
                 <option value="stl">{t.fmtStl}</option>
               </select>
             </div>
-            <button className="btn btn-secondary btn-block" onClick={download} disabled={busy || !file}>
+            <button className="btn btn-secondary btn-block" onClick={download} disabled={busy || cancelling || !previewCurrent}>
               {t.download}
             </button>
+            {activeJobId.current && <button className="btn btn-secondary btn-block" onClick={cancelGeneration} disabled={cancelling}>{t.cancel}</button>}
+            {busy && job && <p role="status">{jobStageOf(lang, job.stage)}</p>}
+            {glb && !previewCurrent && <p role="status">{expired ? t.resultExpired : t.previewStale}</p>}
+            {!!job?.warnings.length && (
+              <div className="data-warnings" role="status">
+                <strong>{t.dataWarnings}</strong>
+                <ul>{job.warnings.map((w) => <li key={`${w.source}-${w.reason}`}>{warningOf(lang, w)}</li>)}</ul>
+              </div>
+            )}
             {status && (
               <p className={`status${status.kind === "error" ? " error" : ""}`}>
                 {status.kind === "error"
@@ -875,7 +961,7 @@ export function App() {
                   ))}
                 </div>
               )}
-              <Preview glb={glb} />
+              <Preview glb={glb} errorText={t.previewError} />
             </div>
           </div>
         </div>

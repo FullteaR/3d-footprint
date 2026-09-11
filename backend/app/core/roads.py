@@ -40,6 +40,8 @@ unions a few hundred mesh-sized polygons.
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
 import hashlib
 
 import numpy as np
@@ -97,14 +99,15 @@ def _surface(mesh: str, url: str):
     by reference.
     """
     cache = _cache_path(mesh, url)
-    if cache.is_file():
-        return shapely.from_wkb(np.load(cache)["wkb"].tobytes())
+    if (d := disk_cache.load_npz(cache)) is not None:
+        return shapely.from_wkb(d["wkb"].tobytes())
 
     polys = []
     try:
         for road in citygml.stream_features(url, _ROAD_TAG):
             polys.extend(_road_surface(road))
-    except (requests.RequestException, OSError, ValueError):
+    except (requests.RequestException, OSError, ValueError, etree.LxmlError):
+        report.warn("roads")
         return None
 
     # Union per mesh so the request path joins mesh-sized pieces, not millions
@@ -141,6 +144,7 @@ class PlateauRoadProvider:
         """
         urls = plateau.file_urls("tran", plateau.mesh3_codes(proj.grid.bbox))
         if not urls:
+            report.warn("roads", "no_coverage")
             return None
 
         parts = list(plateau.distinct_files(

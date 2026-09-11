@@ -36,6 +36,8 @@ heavy parse runs once.
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
 import hashlib
 
 import numpy as np
@@ -108,8 +110,7 @@ def _geometry(mesh: str, url: str):
     by reference.
     """
     cache = _cache_path(mesh, url)
-    if cache.is_file():
-        d = np.load(cache)
+    if (d := disk_cache.load_npz(cache)) is not None:
         return d["verts"], d["faces"]
 
     lat_mid = citygml.mesh_lat_mid(mesh)
@@ -127,7 +128,8 @@ def _geometry(mesh: str, url: str):
                 all_v.append(pts)
                 all_f.append(faces + voff)
                 voff += len(pts)
-    except (requests.RequestException, OSError, ValueError):
+    except (requests.RequestException, OSError, ValueError, etree.LxmlError):
+        report.warn("bridges")
         return None
 
     if not all_v:
@@ -171,6 +173,7 @@ class PlateauBridgeProvider:
         """
         urls = plateau.file_urls("brid", plateau.mesh3_codes(proj.grid.bbox))
         if not urls:
+            report.warn("bridges", "no_coverage")
             return None
 
         verts, faces = [], []

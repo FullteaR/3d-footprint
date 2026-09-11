@@ -11,6 +11,8 @@ and each distinct content only once however many cities publish it. What is
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
 import hashlib
 import threading
 import time
@@ -44,10 +46,19 @@ def _fetch_chunk(chunk: tuple[str, ...]) -> list[dict] | None:
     try:
         resp = session().get(DATACATALOG_URL.format(codes=",".join(chunk)), timeout=60)
     except requests.RequestException:
+        report.warn("plateau_catalog")
         return None
     if resp.status_code != 200:
+        report.warn("plateau_catalog")
         return None
-    return resp.json().get("cities", [])
+    try:
+        cities = resp.json().get("cities", [])
+        if not isinstance(cities, list):
+            raise ValueError("invalid catalog")
+        return cities
+    except (ValueError, AttributeError):
+        report.warn("plateau_catalog", "parse_failed")
+        return None
 
 
 def fetch_datacatalog_cities(codes: list[str]) -> list[dict]:

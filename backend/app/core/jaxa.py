@@ -9,6 +9,9 @@ module is a pure data source.
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
+import io
 import math
 
 import numpy as np
@@ -60,9 +63,9 @@ def _fetch_tile(li: int, la: int) -> np.ndarray | None:
     """
     cache = DATA_DIR / "jaxa_lulc" / f"{YEAR}_E{li / 10:.2f}_N{la / 10:.2f}.tif"
     absent = cache.with_suffix(".absent")
-    if cache.is_file():
-        return np.asarray(Image.open(cache))
-    if absent.is_file():
+    if (data := disk_cache.read_bytes(cache)) is not None:
+        return np.asarray(Image.open(io.BytesIO(data)))
+    if disk_cache.read_bytes(absent) is not None:
         return None
 
     url = TILE_URL.format(
@@ -73,18 +76,20 @@ def _fetch_tile(li: int, la: int) -> np.ndarray | None:
     try:
         resp = session().get(url, timeout=60)
     except requests.RequestException:
+        report.warn("jaxa")
         return None  # transient: retry on the next request, no marker
-    if resp.status_code in (403, 404):  # S3 may answer either for a missing key
-        absent.parent.mkdir(parents=True, exist_ok=True)
-        absent.touch()
+    if resp.status_code == 404:
+        atomic_write_bytes(absent, b"")
         return None
     if resp.status_code != 200:
+        report.warn("jaxa")
         return None
     atomic_write_bytes(cache, resp.content)
     try:
-        return np.asarray(Image.open(cache))
+        return np.asarray(Image.open(io.BytesIO(resp.content)))
     except OSError:
         cache.unlink(missing_ok=True)
+        report.warn("jaxa", "parse_failed")
         return None
 
 
@@ -118,4 +123,6 @@ def class_grid(grid: ElevationGrid) -> np.ndarray | None:
         rows = np.clip(((lat_s + TILE_DEG - lat2d[m]) * h / TILE_DEG).astype(int), 0, h - 1)
         cols = np.clip(((lon2d[m] - lon_w) * w / TILE_DEG).astype(int), 0, w - 1)
         out[m] = tile[rows, cols]
+    if not covered:
+        report.warn("jaxa", "no_coverage")
     return out if covered else None

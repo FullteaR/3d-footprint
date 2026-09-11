@@ -23,6 +23,8 @@ what is left is big enough to actually print.
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
 import hashlib
 
 import numpy as np
@@ -193,8 +195,7 @@ def _rings_cache_path(code: str, url: str):
 def _load_rings(code: str, url: str):
     """Parsed rings of one luse file, cached as npz (the GML parse is the slow bit)."""
     cache = _rings_cache_path(code, url)
-    if cache.is_file():
-        z = np.load(cache)
+    if (z := disk_cache.load_npz(cache)) is not None:
         return z["coords"], z["starts"], z["codes"], z["feats"]
     try:
         with session().get(url, stream=True, timeout=300) as resp:
@@ -202,6 +203,7 @@ def _load_rings(code: str, url: str):
             resp.raw.decode_content = True
             coords, starts, codes, feats = _parse_luse(resp.raw)
     except (requests.RequestException, OSError, ValueError, etree.LxmlError):
+        report.warn("landuse")
         return None
     atomic_savez(cache, coords=coords, starts=starts, codes=codes, feats=feats)
     return coords, starts, codes, feats
@@ -285,6 +287,7 @@ def _plateau_index_grid(grid: ElevationGrid) -> np.ndarray | None:
             float(grid.lons[-1]), float(grid.lats[-1]))
     files = _luse_files(bbox)
     if not files:
+        report.warn("landuse", "no_coverage")
         return None
 
     ny, nx = grid.lats.size, grid.lons.size
@@ -293,13 +296,12 @@ def _plateau_index_grid(grid: ElevationGrid) -> np.ndarray | None:
         + sorted(url for _, url in files)
     ).encode()).hexdigest()[:16]
     memo = DATA_DIR / "plateau_luse" / f"grid_{key}.npz"
-    if memo.is_file():
-        return np.load(memo)["classes"]
+    if (d := disk_cache.load_npz(memo)) is not None:
+        return d["classes"]
     idx, all_loaded = _paint(grid, files)
     if not all_loaded:
         return idx if idx.any() else None
-    memo.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(memo, classes=idx)
+    atomic_savez(memo, classes=idx)
     return idx
 
 

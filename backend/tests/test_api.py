@@ -1,4 +1,4 @@
-"""The /api/generate endpoint, end to end — without the network.
+"""The mesh pipeline through a test-only synchronous HTTP adapter.
 
 The route's two outside inputs are the DEM mosaic and the land-use raster, and
 both are plain arrays, so patching the two fetchers runs the whole real
@@ -15,11 +15,16 @@ import zipfile
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from fastapi import FastAPI
+from fastapi.responses import Response
+from fastapi.exceptions import RequestValidationError
+import inspect
+from app.main import _readable_validation_error
+from app.core.export import export_bodies
 from shapely.geometry import Point, box
 from shapely.ops import transform
 
 from app.api import routes
-from app.main import app
 
 from conftest import DEG, LAT0, LON0, N, make_grid
 
@@ -31,6 +36,18 @@ SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40">'
 
 @pytest.fixture
 def client():
+    # Keep the geometry regressions independent of process IPC. The production
+    # job HTTP lifecycle and real worker are exercised separately in test_jobs.
+    app = FastAPI()
+    app.add_exception_handler(RequestValidationError, _readable_validation_error)
+    def render(**params):
+        model = routes.build_model(**params)
+        data, content_type, ext = export_bodies(model.bodies, params["fmt"], model.colors,
+                                               model.credit_full, model.credit_ascii)
+        return Response(data, media_type=content_type,
+                        headers={"Content-Disposition": f'attachment; filename="footprint.{ext}"'})
+    render.__signature__ = inspect.signature(routes.build_model, eval_str=True).replace(return_annotation=Response)
+    app.post("/api/generate", response_model=None)(render)
     return TestClient(app)
 
 
@@ -73,12 +90,6 @@ def metadata(data: bytes) -> dict:
 
 def object_names(data: bytes) -> list[str]:
     return [o.get("name") for o in model_xml(data).findall(".//m:object", _3MF)]
-
-
-# ---- health ----------------------------------------------------------------
-
-def test_health(client):
-    assert client.get("/api/health").json() == {"status": "ok"}
 
 
 # ---- the happy paths -------------------------------------------------------

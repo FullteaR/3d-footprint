@@ -14,6 +14,8 @@ All layers share the same RGB elevation encoding and 標高 T.P. datum.
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
 import io
 import math
 from dataclasses import dataclass
@@ -84,21 +86,20 @@ def _fetch_raw(layer: str, z: int, x: int, y: int) -> np.ndarray | None:
     """
     cache = DATA_DIR / layer / str(z) / str(x) / f"{y}.png"
     absent = cache.with_suffix(".absent")
-    if cache.is_file():
-        return _decode_tile(cache.read_bytes())
-    if absent.is_file():
+    if (data := disk_cache.read_bytes(cache)) is not None:
+        return _decode_tile(data)
+    if disk_cache.read_bytes(absent) is not None:
         return None
 
     with keyed_lock((layer, z, x, y)):
-        if cache.is_file():  # another worker fetched it while we waited
-            return _decode_tile(cache.read_bytes())
-        if absent.is_file():
+        if (data := disk_cache.read_bytes(cache)) is not None:
+            return _decode_tile(data)
+        if disk_cache.read_bytes(absent) is not None:
             return None
         url = TILE_URL.format(layer=layer, z=z, x=x, y=y)
         resp = session().get(url, timeout=20)
         if resp.status_code == 404:
-            absent.parent.mkdir(parents=True, exist_ok=True)
-            absent.touch()
+            atomic_write_bytes(absent, b"")
             return None
         resp.raise_for_status()
 

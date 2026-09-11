@@ -1,11 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { disposeMaterials, disposeModel } from "./dispose";
 
 // Renders a GLB (terrain + track, with per-body colors) from the backend.
 // The mesh is Z-up (millimetres); we tip it to Y-up for natural orbiting.
-export function Preview({ glb }: { glb: ArrayBuffer | null }) {
+export function Preview({ glb, errorText }: { glb: ArrayBuffer | null; errorText: string }) {
+  const [failed, setFailed] = useState(false);
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene>();
   const cameraRef = useRef<THREE.PerspectiveCamera>();
@@ -19,8 +21,14 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
     scene.background = new THREE.Color(0x0f1721); // matches --well in ui.css
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
     camera.position.set(0, 150, 150);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch {
+      setFailed(true);
+      return;
+    }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     mount.appendChild(renderer.domElement);
 
@@ -47,7 +55,7 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
 
     const resize = () => {
       const w = mount.clientWidth;
-      const h = mount.clientHeight;
+      const h = Math.max(1, mount.clientHeight);
       renderer.setSize(w, h); // updateStyle=true so the canvas fills the box
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
@@ -67,44 +75,70 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      controls.dispose();
+      if (modelRef.current) {
+        scene.remove(modelRef.current);
+        disposeModel(modelRef.current);
+        modelRef.current = undefined;
+      }
       renderer.dispose();
+      renderer.forceContextLoss();
       mount.removeChild(renderer.domElement);
+      sceneRef.current = undefined;
+      cameraRef.current = undefined;
+      controlsRef.current = undefined;
     };
   }, []);
 
   // Reload model whenever a new GLB arrives.
   useEffect(() => {
-    if (!glb) return;
+    let stale = false;
+    if (modelRef.current) {
+      sceneRef.current?.remove(modelRef.current);
+      disposeModel(modelRef.current);
+      modelRef.current = undefined;
+    }
+    if (!glb || !sceneRef.current) return;
+    setFailed(false);
     const scene = sceneRef.current!;
     const loader = new GLTFLoader();
-    loader.parse(glb.slice(0), "", (gltf) => {
-      if (modelRef.current) scene.remove(modelRef.current);
-      const model = gltf.scene;
-      model.rotation.x = -Math.PI / 2; // Z-up (mm) -> Y-up
+    const onError = () => { if (!stale) setFailed(true); };
+    try {
+      loader.parse(glb.slice(0), "", (gltf) => {
+        const model = gltf.scene;
+        if (stale) { disposeModel(model); return; }
+        model.rotation.x = -Math.PI / 2; // Z-up (mm) -> Y-up
 
-      // Replace trimesh's PBR/metallic material with a non-metallic one so the
-      // per-body colors read true and bright. Smooth shading (flatShading off)
-      // uses the crease-smoothed normals the backend baked: terrain shades as a
-      // surface while walls/rims/building edges stay crisp. DoubleSide keeps
-      // building faces (whose source normals are inconsistent) from going dark.
-      model.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        const hasColor = !!mesh.geometry.getAttribute("color");
-        mesh.material = new THREE.MeshStandardMaterial({
-          vertexColors: hasColor,
-          color: hasColor ? 0xffffff : 0xc2b280,
-          metalness: 0,
-          roughness: 0.85,
-          side: THREE.DoubleSide,
-          flatShading: false,
+        // Replace trimesh's PBR/metallic material with a non-metallic one so the
+        // per-body colors read true and bright. Smooth shading (flatShading off)
+        // uses the crease-smoothed normals the backend baked: terrain shades as a
+        // surface while walls/rims/building edges stay crisp. DoubleSide keeps
+        // building faces (whose source normals are inconsistent) from going dark.
+        const replacedMaterials: THREE.Material[] = [];
+        model.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          const hasColor = !!mesh.geometry.getAttribute("color");
+          replacedMaterials.push(...(Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
+          mesh.material = new THREE.MeshStandardMaterial({
+            vertexColors: hasColor,
+            color: hasColor ? 0xffffff : 0xc2b280,
+            metalness: 0,
+            roughness: 0.85,
+            side: THREE.DoubleSide,
+            flatShading: false,
+          });
         });
-      });
+        disposeMaterials(replacedMaterials);
 
-      scene.add(model);
-      modelRef.current = model;
-      fitCamera(model);
-    });
+        scene.add(model);
+        modelRef.current = model;
+        fitCamera(model);
+      }, onError);
+    } catch {
+      onError();
+    }
+    return () => { stale = true; };
   }, [glb]);
 
   function fitCamera(model: THREE.Object3D) {
@@ -124,5 +158,7 @@ export function Preview({ glb }: { glb: ArrayBuffer | null }) {
     controls.update();
   }
 
-  return <div ref={mountRef} style={{ width: "100%", height: "100%", minHeight: 360 }} />;
+  return <div ref={mountRef} style={{ width: "100%", height: "100%", minHeight: 360 }}>
+    {failed && <p role="alert">{errorText}</p>}
+  </div>;
 }

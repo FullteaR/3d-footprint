@@ -5,4 +5,7 @@
 .git
 data
 .venv
+**/.venv
+.env
+.env.*
 frontend/.vite

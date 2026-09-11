@@ -10,6 +10,19 @@ STATIC_DIR = Path(os.environ.get("STATIC_DIR", "/app/static"))
 
 # Persistent cache for DEM / PLATEAU data (mounted as a Docker volume).
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
+JOBS_DIR = Path(os.environ.get("JOBS_DIR", "/app/jobs"))
+JOB_TIMEOUT_SECONDS = int(os.environ.get("JOB_TIMEOUT_SECONDS", "900"))
+JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
+MAX_JOBS = int(os.environ.get("MAX_JOBS", "8"))
+JOB_WORKERS = int(os.environ.get("JOB_WORKERS", "1"))
+MAX_JOB_BYTES = int(os.environ.get("MAX_JOB_BYTES", str(512 * 1024 * 1024)))
+CACHE_MAX_BYTES = int(os.environ.get("CACHE_MAX_BYTES", str(5 * 1024**3)))
+CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", str(30 * 86400)))
+ABSENT_TTL_SECONDS = int(os.environ.get("ABSENT_TTL_SECONDS", "3600"))
+for _name in ("JOB_TIMEOUT_SECONDS", "JOB_TTL_SECONDS", "MAX_JOBS", "JOB_WORKERS",
+              "MAX_JOB_BYTES", "CACHE_MAX_BYTES", "CACHE_TTL_SECONDS", "ABSENT_TTL_SECONDS"):
+    if globals()[_name] <= 0:
+        raise ValueError(f"{_name} must be positive")
 
 # Upload ceilings, in bytes. Both files are read whole into memory and neither
 # is large in honest use: a GPX is text, and even a multi-day outing at one

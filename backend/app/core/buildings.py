@@ -49,6 +49,8 @@ only on the first use of an area.
 """
 from __future__ import annotations
 
+from . import cache as disk_cache, report
+
 import hashlib
 
 import numpy as np
@@ -131,8 +133,7 @@ def _geometry(mesh: str, url: str):
     by reference.
     """
     cache = _cache_path(mesh, url)
-    if cache.is_file():
-        d = np.load(cache)
+    if (d := disk_cache.load_npz(cache)) is not None:
         return d["verts"], d["faces"], d["ftype"], d["vbid"]
 
     lat_mid = citygml.mesh_lat_mid(mesh)
@@ -155,7 +156,8 @@ def _geometry(mesh: str, url: str):
             if voff > started:
                 all_b.append(np.full(voff - started, bid, np.int32))
                 bid += 1
-    except (requests.RequestException, OSError, ValueError):
+    except (requests.RequestException, OSError, ValueError, etree.LxmlError):
+        report.warn("buildings")
         return None
 
     if not all_v:
@@ -210,6 +212,7 @@ class PlateauBuildingProvider:
         grid = proj.grid
         urls = plateau.file_urls("bldg", plateau.mesh3_codes(grid.bbox))
         if not urls:
+            report.warn("buildings", "no_coverage")
             return None
 
         verts, faces, vbid = [], [], []

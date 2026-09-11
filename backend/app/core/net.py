@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import os
 import threading
-from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
+from .cache import write_budget
 
 USER_AGENT = "3d-footprint/0.1"
 
@@ -50,7 +50,9 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     tmp = _tmp_path(path)
     try:
         tmp.write_bytes(data)
-        os.replace(tmp, path)
+        with write_budget(path, len(data)) as admitted:
+            if admitted:
+                os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -62,18 +64,29 @@ def atomic_savez(path: Path, **arrays: np.ndarray) -> None:
     try:
         with open(tmp, "wb") as f:
             np.savez_compressed(f, **arrays)
-        os.replace(tmp, path)
+        with write_budget(path, tmp.stat().st_size) as admitted:
+            if admitted:
+                os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 
 
-_key_locks: dict[object, threading.Lock] = defaultdict(threading.Lock)
+_key_locks: dict[object, tuple[threading.Lock, int]] = {}
 
 
 @contextmanager
 def keyed_lock(key: object):
     """Serialize one cache key's fetch across threads (dedupes downloads)."""
     with _guard:
-        lock = _key_locks[key]
-    with lock:
-        yield
+        lock, users = _key_locks.get(key, (threading.Lock(), 0))
+        _key_locks[key] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _guard:
+            _, users = _key_locks[key]
+            if users == 1:
+                del _key_locks[key]
+            else:
+                _key_locks[key] = (lock, users - 1)

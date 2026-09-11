@@ -1,6 +1,8 @@
 """FastAPI app: serves the /api/* routes and the built frontend (single container)."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,8 +12,18 @@ from fastapi.staticfiles import StaticFiles
 from .api.routes import router as api_router
 from .config import CORS_ORIGINS, MAX_REQUEST_BYTES, STATIC_DIR
 from .limits import LimitRequestBody
+from . import jobs
 
-app = FastAPI(title="3d-footprint", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    jobs.manager.start()
+    try:
+        yield
+    finally:
+        jobs.manager.close()
+
+
+app = FastAPI(title="3d-footprint", version="0.2.0", lifespan=lifespan)
 
 # Order matters, and it is the reverse of the order added: the last one wrapped
 # is the outermost. CORS goes on last so its headers reach the body-size 413

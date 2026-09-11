@@ -6,13 +6,42 @@ services:
       # and an untargeted build would take that instead.
       target: runtime
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       # Persist DEM / PLATEAU caches across runs (avoid re-downloading).
-      - ./data:/app/data
+      - cache:/app/data
+      - jobs:/app/jobs
     environment:
       - DATA_DIR=/app/data
       - STATIC_DIR=/app/static
+      - JOBS_DIR=/app/jobs
+      - JOB_WORKERS=${JOB_WORKERS:-1}
+      - MAX_JOBS=${MAX_JOBS:-8}
+      - JOB_TIMEOUT_SECONDS=${JOB_TIMEOUT_SECONDS:-900}
+      - JOB_TTL_SECONDS=${JOB_TTL_SECONDS:-3600}
+      - MAX_JOB_BYTES=${MAX_JOB_BYTES:-536870912}
+      - CACHE_MAX_BYTES=${CACHE_MAX_BYTES:-5368709120}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-2592000}
+      - ABSENT_TTL_SECONDS=${ABSENT_TTL_SECONDS:-3600}
+      - PARSE_PROCS=${PARSE_PROCS:-2}
+      - CORS_ORIGINS=
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+    init: true
+    restart: unless-stopped
+    mem_limit: ${APP_MEMORY_LIMIT:-4g}
+    cpus: ${APP_CPUS:-2}
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # `docker compose run --rm test` — the backend suite, in the runtime image.
   # Sources are mounted, so a re-run picks up edits without a rebuild; the
@@ -28,7 +57,12 @@ services:
     environment:
       # Nor the real cache, for the same reason.
       - DATA_DIR=/tmp/3dfp-test-data
+      - JOBS_DIR=/tmp/3dfp-test-jobs
     volumes:
       - ./backend/app:/app/app
       - ./backend/tests:/app/tests
       - ./backend/pytest.ini:/app/pytest.ini
+
+volumes:
+  cache:
+  jobs:

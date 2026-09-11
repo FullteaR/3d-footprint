@@ -80,11 +80,17 @@ const JA = {
   fmt3mf: "3MF（多色・単一ファイル）",
   fmtStlMulti: "STL（多色・色ごと分割ZIP）",
   fmtStl: "STL（単色）",
-  download: "生成してダウンロード",
+  download: "表示中の模型をダウンロード",
   stNeedFile: "GPXファイルを選択してください",
   stGenerating: "3Dモデル生成中…",
-  stDownloading: "生成中…",
+  stDownloading: "ダウンロード中…",
   stDownloaded: "ダウンロードしました。",
+  stCancelled: "生成をキャンセルしました。",
+  cancel: "生成をキャンセル",
+  previewStale: "設定が変わりました。再生成するとダウンロードできます。",
+  resultExpired: "保存期限が切れました。再生成してください。",
+  dataWarnings: "データについてのお知らせ",
+  previewError: "3Dプレビューを表示できません。WebGL対応のブラウザで開き直してください。",
   errorPrefix: "エラー: ",
   gpxFile: "GPXファイル",
   svgFile: "銘板のSVG",
@@ -197,11 +203,17 @@ const EN: typeof JA = {
   fmt3mf: "3MF (multi-colour, one file)",
   fmtStlMulti: "STL (multi-colour, ZIP split per colour)",
   fmtStl: "STL (single colour)",
-  download: "Generate and download",
+  download: "Download previewed model",
   stNeedFile: "Choose a GPX file first",
   stGenerating: "Generating the 3D model…",
-  stDownloading: "Generating…",
+  stDownloading: "Downloading…",
   stDownloaded: "Downloaded.",
+  stCancelled: "Generation cancelled.",
+  cancel: "Cancel generation",
+  previewStale: "Settings have changed. Generate again before downloading.",
+  resultExpired: "The saved model has expired. Generate it again.",
+  dataWarnings: "Data availability",
+  previewError: "The 3D preview could not be displayed. Try a browser with WebGL support.",
   errorPrefix: "Error: ",
   gpxFile: "The GPX file",
   svgFile: "The nameplate SVG",
@@ -259,4 +271,31 @@ export function initialLang(): Lang {
 
 export function rememberLang(lang: Lang) {
   localStorage.setItem(STORE_KEY, lang);
+}
+
+
+export function jobStageOf(lang: Lang, stage: string): string {
+  const stages: Record<string, [string, string]> = {
+    queued: ["順番待ち…", "Queued…"], starting: ["生成を準備中…", "Preparing…"],
+    terrain: ["地形を取得中…", "Loading terrain…"], landuse: ["土地利用を処理中…", "Processing land use…"],
+    structures: ["建物・橋・道路を処理中…", "Processing buildings, bridges and roads…"],
+    model: ["模型を組み立て中…", "Building the model…"], exporting: ["ファイルを保存中…", "Saving model files…"],
+    succeeded: ["生成完了", "Complete"],
+  };
+  return stages[stage]?.[lang === "ja" ? 0 : 1] ?? TEXT[lang].stGenerating;
+}
+
+export function warningOf(lang: Lang, warning: { source: string; reason: string }): string {
+  const sources: Record<string, [string, string]> = {
+    jaxa: ["JAXA土地被覆", "JAXA land cover"], landuse: ["PLATEAU土地利用", "PLATEAU land use"],
+    buildings: ["建物", "Buildings"], bridges: ["橋", "Bridges"], roads: ["道路", "Roads"],
+    plateau_catalog: ["PLATEAUデータ一覧", "PLATEAU catalog"],
+  };
+  const name = sources[warning.source]?.[lang === "ja" ? 0 : 1] ?? warning.source;
+  const reason = warning.reason === "no_coverage"
+    ? (lang === "ja" ? "この範囲の提供データがありません。" : "No data is available for this area.")
+    : warning.reason === "scale"
+    ? (lang === "ja" ? "この縮尺では省略されます。" : "Omitted at this scale.")
+    : (lang === "ja" ? "一部の取得・解析に失敗しました。模型から欠けている可能性があります。" : "Some data could not be loaded or parsed and may be missing from the model.");
+  return `${name}: ${reason}`;
 }

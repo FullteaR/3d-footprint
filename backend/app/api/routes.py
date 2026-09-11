@@ -2,17 +2,25 @@
 from __future__ import annotations
 
 from typing import NamedTuple
+import inspect
+import os
+
+import requests
 
 import trimesh
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Request
+from fastapi.responses import Response, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
+
+from .. import jobs
+from ..core import report
 from shapely.geometry import box
 from shapely.ops import transform
 
 from ..config import MAX_GPX_BYTES, MAX_SVG_BYTES
 from ..core.bridges import PlateauBridgeProvider
 from ..core.buildings import PlateauBuildingProvider
-from ..core.export import Body, export_bodies
+from ..core.export import Body
 from ..core.gpx import (
     clip_track, expand_bbox, parse_bbox_param, parse_gpx,
     parse_time_range_param, trim_track,
@@ -37,6 +45,8 @@ router = APIRouter(prefix="/api")
 
 @router.get("/health")
 def health() -> dict:
+    if not jobs.manager.healthy():
+        raise HTTPException(503, "generation supervisor unavailable")
     return {"status": "ok"}
 
 
@@ -277,8 +287,14 @@ def _front_edge(region: Region, proj) -> tuple[float, float]:
     return (0.25 * w, 0.75 * w) if region.shape == "hex" else (0.0, w)
 
 
-@router.post("/generate")
-def generate(
+class BuiltModel(NamedTuple):
+    bodies: list[Body]
+    colors: dict[str, str]
+    credit_full: str
+    credit_ascii: str
+
+
+def build_model(
     file: UploadFile = File(...),
     size_mm: float = Form(120.0, gt=0, le=500),
     vertical_scale: float = Form(1.0, gt=0, le=50),
@@ -306,7 +322,7 @@ def generate(
     plate_rotation_deg: float = Form(0.0),
     plate_relief_mm: float = Form(0.6, ge=0, le=20),
     fmt: str = Form("stl"),
-) -> Response:
+) -> BuiltModel:
     """GPX -> terrain solid (+ land-use color, + track ridge) -> printable file.
 
     Land-use colouring is always applied where data covers the area; only its
@@ -342,6 +358,9 @@ def generate(
     model outline*, so rotating the model carries the plate with it).
     """
     try:
+        if fmt not in jobs.FORMATS:
+            raise ValueError(f"unsupported format: {fmt}")
+        report.stage("terrain")
         track = parse_gpx(_read_upload(file, MAX_GPX_BYTES, "GPXファイル"))
         if time_range:
             track = trim_track(track, *parse_time_range_param(time_range))
@@ -384,14 +403,19 @@ def generate(
             proj.flatten_under(plate.footprint, plate.levels.pocket)
         structure_clip = _structure_clip(clip_mm, plate, proj)
 
+        report.stage("landuse")
         bodies, landuse = _terrain_bodies(proj, min_color_mm, clip_mm)
         # Requested *and* fine enough to show; below, the credit names what
         # was actually used rather than what was asked for.
         structures = include_buildings and _structures_can_show(proj)
+        if include_buildings and not structures:
+            report.warn("buildings", "scale")
         if structures:
+            report.stage("structures")
             bodies += _structure_bodies(
                 proj, building_scale, min_feature_mm, clip_mm, structure_clip
             )
+        report.stage("model")
         if include_track:
             bodies += _track_bodies(
                 track, region, proj, clip_ll,
@@ -419,16 +443,61 @@ def generate(
             "terrain": terrain_color, "track": track_color,
             "building": building_color, "plate": terrain_color,
         }
-        data, content_type, ext = export_bodies(
-            bodies, fmt, colors,
-            credit_full=formal_credit(landuse, structures),
-            credit_ascii=ascii_credit(landuse, structures),
-        )
+        return BuiltModel(bodies, colors, formal_credit(landuse, structures),
+                          ascii_credit(landuse, structures))
+    except requests.RequestException:
+        raise HTTPException(502, "標高データを取得できませんでした。時間をおいて再試行してください。")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    return Response(
-        content=data,
-        media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="footprint.{ext}"'},
-    )
+
+def submit_generation(request: Request, **params):
+    gpx = _read_upload(params.pop("file"), MAX_GPX_BYTES, "GPXファイル")
+    svg = params.pop("plate_svg", None)
+    svg_data = _read_upload(svg, MAX_SVG_BYTES, "銘板のSVG") if svg else b""
+    if params["fmt"] not in jobs.FORMATS:
+        raise HTTPException(400, "unsupported format")
+    state = jobs.manager.submit(params, gpx, svg_data, request.headers.get("Idempotency-Key"))
+    return JSONResponse(state, status_code=202,
+                        headers={"Location": f'/api/jobs/{state["id"]}', "Cache-Control": "no-store"})
+
+
+# Reuse the exact typed multipart fields and bounds of the pipeline. Keeping a
+# single signature prevents the API and the worker's options from diverging.
+submit_generation.__signature__ = inspect.Signature(
+    [inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
+     *inspect.signature(build_model, eval_str=True).parameters.values()], return_annotation=Response,
+)
+router.post("/generate", status_code=202, response_model=None)(submit_generation)
+
+
+@router.get("/jobs/{job_id}")
+def job_status(job_id: str):
+    return JSONResponse(jobs.manager.snapshot(job_id), headers={"Cache-Control": "no-store"})
+
+
+@router.delete("/jobs/{job_id}", status_code=204)
+def cancel_job(job_id: str):
+    jobs.manager.cancel(job_id)
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/jobs/{job_id}/files/{fmt}")
+def job_file(job_id: str, fmt: str):
+    stream = jobs.manager.open_artifact(job_id, fmt)
+    content_type, ext = jobs.FORMATS[fmt]
+    size = os.fstat(stream.fileno()).st_size
+
+    def chunks():
+        try:
+            while data := stream.read(1024 * 1024):
+                yield data
+        finally:
+            stream.close()
+
+    return StreamingResponse(chunks(), media_type=content_type,
+                             background=BackgroundTask(stream.close), headers={
+        "Content-Length": str(size), "Cache-Control": "private, no-store",
+        "Content-Disposition": f'attachment; filename="footprint.{ext}"',
+        "X-Content-Type-Options": "nosniff",
+    })

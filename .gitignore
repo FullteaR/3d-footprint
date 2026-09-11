@@ -12,6 +12,8 @@ frontend/.vite/
 
 # Data caches (DEM / PLATEAU), mounted as a volume
 data/
+.env
+jobs/
 
 # Editor / OS
 .DS_Store
