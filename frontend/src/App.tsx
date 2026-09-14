@@ -1,5 +1,5 @@
 import { apiFetch, formKey, waitForJob, type Job } from "./generation";
-import { jobStageOf, warningOf } from "./i18n";
+import { jobStageOf } from "./i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MapPicker, clampPlate, extentMeters, fitBbox, freeSpot, moveBbox, normalizeBbox,
@@ -879,12 +879,6 @@ export function App() {
             {activeJobId.current && <button className="btn btn-secondary btn-block" onClick={cancelGeneration} disabled={cancelling}>{t.cancel}</button>}
             {busy && job && <p role="status">{jobStageOf(lang, job.stage)}</p>}
             {glb && !previewCurrent && <p role="status">{expired ? t.resultExpired : t.previewStale}</p>}
-            {!!job?.warnings.length && (
-              <div className="data-warnings" role="status">
-                <strong>{t.dataWarnings}</strong>
-                <ul>{job.warnings.map((w) => <li key={`${w.source}-${w.reason}`}>{warningOf(lang, w)}</li>)}</ul>
-              </div>
-            )}
             {status && (
               <p className={`status${status.kind === "error" ? " error" : ""}`}>
                 {status.kind === "error"

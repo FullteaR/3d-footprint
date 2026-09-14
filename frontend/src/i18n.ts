@@ -89,7 +89,6 @@ const JA = {
   cancel: "生成をキャンセル",
   previewStale: "設定が変わりました。再生成するとダウンロードできます。",
   resultExpired: "保存期限が切れました。再生成してください。",
-  dataWarnings: "データについてのお知らせ",
   previewError: "3Dプレビューを表示できません。WebGL対応のブラウザで開き直してください。",
   errorPrefix: "エラー: ",
   gpxFile: "GPXファイル",
@@ -212,7 +211,6 @@ const EN: typeof JA = {
   cancel: "Cancel generation",
   previewStale: "Settings have changed. Generate again before downloading.",
   resultExpired: "The saved model has expired. Generate it again.",
-  dataWarnings: "Data availability",
   previewError: "The 3D preview could not be displayed. Try a browser with WebGL support.",
   errorPrefix: "Error: ",
   gpxFile: "The GPX file",
@@ -283,19 +281,4 @@ export function jobStageOf(lang: Lang, stage: string): string {
     succeeded: ["生成完了", "Complete"],
   };
   return stages[stage]?.[lang === "ja" ? 0 : 1] ?? TEXT[lang].stGenerating;
-}
-
-export function warningOf(lang: Lang, warning: { source: string; reason: string }): string {
-  const sources: Record<string, [string, string]> = {
-    jaxa: ["JAXA土地被覆", "JAXA land cover"], landuse: ["PLATEAU土地利用", "PLATEAU land use"],
-    buildings: ["建物", "Buildings"], bridges: ["橋", "Bridges"], roads: ["道路", "Roads"],
-    plateau_catalog: ["PLATEAUデータ一覧", "PLATEAU catalog"],
-  };
-  const name = sources[warning.source]?.[lang === "ja" ? 0 : 1] ?? warning.source;
-  const reason = warning.reason === "no_coverage"
-    ? (lang === "ja" ? "この範囲の提供データがありません。" : "No data is available for this area.")
-    : warning.reason === "scale"
-    ? (lang === "ja" ? "この縮尺では省略されます。" : "Omitted at this scale.")
-    : (lang === "ja" ? "一部の取得・解析に失敗しました。模型から欠けている可能性があります。" : "Some data could not be loaded or parsed and may be missing from the model.");
-  return `${name}: ${reason}`;
 }

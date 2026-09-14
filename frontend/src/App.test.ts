@@ -63,7 +63,6 @@ it("downloads the previewed job, then refuses download after a model setting cha
   expect(button(TEXT.ja.download).disabled).toBe(true);
   await act(async () => { button(TEXT.ja.create).click(); });
   expect(button(TEXT.ja.download).disabled).toBe(false);
-  expect(mount.textContent).toContain("一部の取得・解析に失敗");
   await act(async () => { button(TEXT.ja.download).click(); });
   expect(fetcher.mock.calls.filter(([url]) => url === "/api/generate")).toHaveLength(1);
   expect(fetcher.mock.calls.some(([url]) => url === `/api/jobs/${key}/files/3mf`)).toBe(true);
