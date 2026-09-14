@@ -31,8 +31,26 @@ export function normalizeBbox(bb: Bbox, shape: Shape): Bbox {
     const r = Math.max(hw, (2 * hh) / SQ3);
     hw = r; hh = (SQ3 / 2) * r;
   }
+  return bboxAround(clat, clon, hw, hh);
+}
+
+// The bbox centred on [clat, clon] with half extents hw x hh in metres. A
+// degree of longitude shrinks towards the pole, so the degree width must be
+// taken at the centre the bbox will actually have — built at any other
+// latitude, it reads back (here and in the backend) as a different size.
+function bboxAround(clat: number, clon: number, hw: number, hh: number): Bbox {
+  const mlon = M_PER_DEG_LON * Math.cos(clat * RAD);
   return [clon - hw / mlon, clat - hh / M_PER_DEG_LAT,
           clon + hw / mlon, clat + hh / M_PER_DEG_LAT];
+}
+
+// The same outline recentred on [lat, lon]. What it keeps is its size in
+// metres, not in degrees: shifting the corners by the degree offset would
+// rescale the model (and the printed scale) with every move north or south,
+// and a square or hexagon would only ever grow as normalizeBbox restored it.
+export function moveBbox(bb: Bbox, center: [number, number]): Bbox {
+  const g = geoOf(bb);
+  return bboxAround(center[0], center[1], g.hw, g.hh);
 }
 
 // Smallest bbox of `shape` at `rotationDeg` whose outline encloses the whole
@@ -64,9 +82,7 @@ export function fitBbox(
   const lx = (x0 + x1) / 2, ly = (y0 + y1) / 2;      // rect centre, shape frame
   const cx = lx * c - ly * sn, cy = lx * sn + ly * c; // back to world
   const clon = clon0 + cx / mlon, clat = clat0 + cy / M_PER_DEG_LAT;
-  return normalizeBbox(
-    [clon - hw / mlon, clat - hh / M_PER_DEG_LAT,
-     clon + hw / mlon, clat + hh / M_PER_DEG_LAT], shape);
+  return normalizeBbox(bboxAround(clat, clon, hw, hh), shape);
 }
 
 // ---- size / scale helpers (must mirror backend region.half_extents_m) ------
@@ -433,15 +449,12 @@ export function MapPicker({ points, selection = null, bbox, shape, rotation, res
     const lx = (dx >= 0 ? 1 : -1) * w / 2, lyy = (dy >= 0 ? 1 : -1) * h / 2;
     const cx = fx + lx * c - lyy * sn, cy = fy + lx * sn + lyy * c;
     const clon = g.clon + cx / g.mlon, clat = g.clat + cy / M_PER_DEG_LAT;
-    return [clon - w / 2 / g.mlon, clat - h / 2 / M_PER_DEG_LAT,
-            clon + w / 2 / g.mlon, clat + h / 2 / M_PER_DEG_LAT];
+    return bboxAround(clat, clon, w / 2, h / 2);
   }
 
   function moveTo(): Bbox {
-    const b = bboxRef.current!;
     const P = mvRef.current!.getLatLng();
-    const dlon = P.lng - (b[0] + b[2]) / 2, dlat = P.lat - (b[1] + b[3]) / 2;
-    return [b[0] + dlon, b[1] + dlat, b[2] + dlon, b[3] + dlat];
+    return moveBbox(bboxRef.current!, [P.lat, P.lng]);
   }
 
   function rotateTo(): number {

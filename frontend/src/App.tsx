@@ -2,7 +2,7 @@ import { apiFetch, formKey, waitForJob, type Job } from "./generation";
 import { jobStageOf, warningOf } from "./i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  MapPicker, clampPlate, extentMeters, fitBbox, freeSpot, normalizeBbox,
+  MapPicker, clampPlate, extentMeters, fitBbox, freeSpot, moveBbox, normalizeBbox,
   scaleBbox, spanMeters, type Bbox, type PlateEdit, type Shape,
 } from "./MapPicker";
 import { Preview } from "./Preview";
@@ -261,9 +261,7 @@ export function App() {
   const recentre = useCallback((target: Bbox) => {
     const b = bboxRef.current;
     if (!b) { applyBbox(target); return; }
-    const dlon = (target[0] + target[2]) / 2 - (b[0] + b[2]) / 2;
-    const dlat = (target[1] + target[3]) / 2 - (b[1] + b[3]) / 2;
-    setBbox([b[0] + dlon, b[1] + dlat, b[2] + dlon, b[3] + dlat]);
+    setBbox(moveBbox(b, [(target[1] + target[3]) / 2, (target[0] + target[2]) / 2]));
   }, [applyBbox]);
 
   useEffect(() => {

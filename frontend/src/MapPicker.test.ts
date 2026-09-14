@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   M_PER_DEG_LAT, M_PER_DEG_LON, clampPlate, extentMeters, fitBbox, freeSpot,
-  normalizeBbox, scaleBbox, spanMeters, type Bbox, type Shape,
+  moveBbox, normalizeBbox, scaleBbox, spanMeters, type Bbox, type Shape,
 } from "./MapPicker";
 
 // The outline the user drags is the model's own extent, so its geometry is a
@@ -158,6 +158,43 @@ describe("scaleBbox", () => {
     const bb = normalizeBbox(BB, "square");
     const { hw, hh } = half(scaleBbox(bb, 0.5));
     expect(hw).toBeCloseTo(hh, 6);
+  });
+});
+
+describe("moveBbox", () => {
+  // Dragging the ✥ handle (or 「軌跡の中心へ」) moves the model, it must not
+  // rescale it: a degree of longitude is shorter further north, so an outline
+  // shifted as degrees printed at a different scale wherever it was dropped.
+  const SHAPES = ["rect", "square", "hex"] as Shape[];
+
+  it("lands exactly on the new centre", () => {
+    const out = moveBbox(BB, [35.3, 139.4]);
+    expect(centre(out)[0]).toBeCloseTo(35.3, 12);
+    expect(centre(out)[1]).toBeCloseTo(139.4, 12);
+  });
+
+  it.each(SHAPES)("keeps the %s's size, and so the scale, north or south", (shape) => {
+    const bb = normalizeBbox(BB, shape);
+    const [clat, clon] = centre(bb);
+    for (const dlat of [0.5, -0.5, 5]) {
+      const out = normalizeBbox(moveBbox(bb, [clat + dlat, clon + 0.3]), shape);
+      expect(spanMeters(out, shape)).toBeCloseTo(spanMeters(bb, shape), 6);
+      expect(extentMeters(out)[0]).toBeCloseTo(extentMeters(bb)[0], 6);
+      expect(extentMeters(out)[1]).toBeCloseTo(extentMeters(bb)[1], 6);
+    }
+  });
+
+  it.each(SHAPES)("brings a %s home the size it left", (shape) => {
+    // Every drag re-normalises, which inflates a square or hexagon whose
+    // aspect a move bent — so a round trip used to leave it larger.
+    let bb = normalizeBbox(BB, shape);
+    const home = centre(bb), start = spanMeters(bb, shape);
+    for (const dlat of [0.05, -0.1, 0.05, -0.2, 0.2]) {
+      const [clat, clon] = centre(bb);
+      bb = normalizeBbox(moveBbox(bb, [clat + dlat, clon]), shape);
+    }
+    expect(centre(bb)[0]).toBeCloseTo(home[0], 9);
+    expect(spanMeters(bb, shape)).toBeCloseTo(start, 6);
   });
 });
 
